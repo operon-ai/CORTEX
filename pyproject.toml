@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cua-agents"
+version = "0.3.2"
+description = "Cortex — a library for autonomous GUI agents using multimodal LLMs."
+readme = "README.md"
+authors = [{ name = "Udit" }]
+requires-python = ">=3.9, <=3.12"
+keywords = ["ai", "llm", "gui", "agent", "multimodal", "cua", "cortex"]
+
+# Core dependencies for Cortex + Azure OpenAI + vLLM grounding
+dependencies = [
+    "numpy",
+    "backoff",
+    "openai",           # OpenAI, Azure OpenAI, and vLLM all use openai SDK
+    "pyautogui",        # Screen interaction
+    "pillow",           # Image processing (PIL)
+    "pytesseract",      # OCR for grounding
+    "python-dotenv",    # .env file loading
+    "pywinauto; sys_platform == 'win32'",
+    "pywin32; sys_platform == 'win32'",
+    "pyobjc; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+# Install with: uv sync --extra gemini
+gemini = [
+    "google-genai",
+]
+
+# Install with: uv sync --extra dev
+dev = [
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+cortex = "cua_agents.v1.cli_app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cua_agents"]
+
+[tool.uv]
+# Use a local virtual environment managed by uv
+dev-dependencies = [
+    "black",
+    "ruff",
+]
