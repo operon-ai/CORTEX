@@ -14,7 +14,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 #### Clone and install for development
 ```bash
-git clone https://github.com/your-org/cortex.git
+git clone https://github.com/operon-ai/CORTEX.git
 cd CORTEX
 uv sync          # creates .venv and installs all core dependencies
 ```
