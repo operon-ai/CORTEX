@@ -12,6 +12,7 @@ from cua_agents.v1.core.mllm import LMMAgent
 from cua_agents.v1.utils.common_utils import call_llm_safe
 from cua_agents.v1.agents.code_agent import CodeAgent
 import logging
+from langfuse import observe
 
 logger = logging.getLogger("cortex.agent")
 
@@ -225,7 +226,7 @@ class OSWorldACI(ACI):
         self.current_task_instruction = None
         self.last_code_agent_result = None
 
-    # Given the state and worker's referring expression, use the grounding model to generate (x,y)
+    @observe(name="grounding_generate_coords")
     def generate_coords(self, ref_expr: str, obs: Dict) -> List[int]:
 
         # Reset the grounding model state
@@ -281,7 +282,7 @@ class OSWorldACI(ACI):
 
         return ocr_table, ocr_elements
 
-    # Given the state and worker's text phrase, generate the coords of the first/last word in the phrase
+    @observe(name="grounding_generate_text_coords")
     def generate_text_coords(
         self, phrase: str, obs: Dict, alignment: str = ""
     ) -> List[int]:

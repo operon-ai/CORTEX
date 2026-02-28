@@ -1,6 +1,7 @@
 import argparse
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file from current directory or parent directories
+import base64
 import datetime
 import io
 import logging
@@ -12,6 +13,7 @@ import sys
 import time
 
 from PIL import Image
+from langfuse import observe, get_client
 
 from cua_agents.v1.agents.grounding import OSWorldACI
 from cua_agents.v1.agents.cortex import Cortex
@@ -121,8 +123,8 @@ debug_handler.setFormatter(formatter)
 stdout_handler.setFormatter(formatter)
 sdebug_handler.setFormatter(formatter)
 
-stdout_handler.addFilter(logging.Filter("desktopenv"))
-sdebug_handler.addFilter(logging.Filter("desktopenv"))
+stdout_handler.addFilter(logging.Filter("cortex"))
+sdebug_handler.addFilter(logging.Filter("cortex"))
 
 logger.addHandler(file_handler)
 logger.addHandler(debug_handler)
@@ -154,8 +156,11 @@ def scale_screen_dimensions(width: int, height: int, max_dim_size: int):
     return safe_width, safe_height
 
 
+@observe(name="cortex_run")
 def run_agent(agent, instruction: str, scaled_width: int, scaled_height: int):
     global paused
+    langfuse = get_client()
+    langfuse.update_current_trace(name=instruction)
     obs = {}
     traj = "Task:\n" + instruction
     subtask_traj = ""
@@ -180,10 +185,23 @@ def run_agent(agent, instruction: str, scaled_width: int, scaled_height: int):
         while paused:
             time.sleep(0.1)
 
-        print(f"\n🔄 Step {step + 1}/15: Getting next action from agent...")
+        print(f"\nStep {step + 1}/15: Getting next action from agent...")
 
         # Get next action code from the agent
         info, code = agent.predict(instruction=instruction, observation=obs)
+
+        # Log step with screenshot to Langfuse
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        langfuse.update_current_span(
+            metadata={
+                "step": step + 1,
+                "action": code[0],
+            },
+            input={
+                "instruction": instruction,
+                "screenshot": f"data:image/png;base64,{screenshot_b64}",
+            },
+        )
 
         if "done" in code[0].lower() or "fail" in code[0].lower():
             if platform.system() == "Darwin":
@@ -201,7 +219,7 @@ def run_agent(agent, instruction: str, scaled_width: int, scaled_height: int):
             continue
 
         if "wait" in code[0].lower():
-            print("⏳ Agent requested wait...")
+            print("\u23f3 Agent requested wait...")
             time.sleep(5)
             continue
 
@@ -225,6 +243,9 @@ def run_agent(agent, instruction: str, scaled_width: int, scaled_height: int):
                     + "\n\n----------------------\n\nPlan:\n"
                     + info["executor_plan"]
                 )
+
+    # Flush Langfuse events at end of task
+    langfuse.flush()
 
 
 def main():

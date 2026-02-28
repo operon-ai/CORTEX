@@ -1,3 +1,4 @@
+import base64
 from functools import partial
 import logging
 import textwrap
@@ -17,6 +18,7 @@ from cua_agents.v1.utils.formatters import (
     SINGLE_ACTION_FORMATTER,
     CODE_VALID_FORMATTER,
 )
+from langfuse import observe, get_client
 
 logger = logging.getLogger("cortex.agent")
 
@@ -122,6 +124,7 @@ class Worker(BaseModule):
             if len(self.reflection_agent.messages) > self.max_trajectory_length + 1:
                 self.reflection_agent.messages.pop(1)
 
+    @observe(name="worker_reflection")
     def _generate_reflection(self, instruction: str, obs: Dict) -> Tuple[str, str]:
         """
         Generate a reflection based on the current observation and instruction.
@@ -177,6 +180,7 @@ class Worker(BaseModule):
                 logger.info("REFLECTION: %s", reflection)
         return reflection, reflection_thoughts
 
+    @observe(name="worker_generate_next_action")
     def generate_next_action(self, instruction: str, obs: Dict) -> Tuple[Dict, List]:
         """
         Predict the next action(s) based on the current observation.
@@ -184,6 +188,17 @@ class Worker(BaseModule):
 
         self.grounding_agent.assign_screenshot(obs)
         self.grounding_agent.set_task_instruction(instruction)
+
+        # Override Langfuse auto-captured input with serializable screenshot
+        langfuse = get_client()
+        screenshot_b64 = base64.b64encode(obs["screenshot"]).decode("utf-8")
+        langfuse.update_current_span(
+            input={
+                "instruction": instruction,
+                "screenshot": f"data:image/png;base64,{screenshot_b64}",
+                "turn_count": self.turn_count,
+            }
+        )
 
         generator_message = (
             ""

@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "backoff",
     "openai",           # OpenAI, Azure OpenAI, and vLLM all use openai SDK
+    "langfuse",         # LLM observability & tracing
     "pyautogui",        # Screen interaction
     "pillow",           # Image processing (PIL)
     "pytesseract",      # OCR for grounding

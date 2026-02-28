@@ -1,6 +1,7 @@
 import os
 
 import backoff
+from langfuse import observe, get_client
 from openai import (
     AzureOpenAI,
     OpenAI,
@@ -36,10 +37,15 @@ class LMMEngineOpenAI(LMMEngine):
         self.llm_client = None
         self.temperature = temperature  # Force temperature (e.g. o3 requires 1.0)
 
+    @observe(as_type="generation")
     @backoff.on_exception(
         backoff.expo, (APIConnectionError, APIError, RateLimitError), max_time=60
     )
     def generate(self, messages, temperature=0.0, max_new_tokens=None, **kwargs):
+        langfuse = get_client()
+        langfuse.update_current_span(
+            metadata={"engine": "openai", "model": self.model}
+        )
         api_key = self.api_key or os.getenv("OPENAI_API_KEY")
         if api_key is None:
             raise ValueError(
@@ -90,10 +96,15 @@ class LMMEngineAzureOpenAI(LMMEngine):
         self.cost = 0.0
         self.temperature = temperature
 
+    @observe(as_type="generation")
     @backoff.on_exception(
         backoff.expo, (APIConnectionError, APIError, RateLimitError), max_time=60
     )
     def generate(self, messages, temperature=0.0, max_new_tokens=None, **kwargs):
+        langfuse = get_client()
+        langfuse.update_current_span(
+            metadata={"engine": "azure", "model": self.model}
+        )
         api_key = self.api_key or os.getenv("AZURE_OPENAI_API_KEY")
         if api_key is None:
             raise ValueError(
@@ -147,6 +158,7 @@ class LMMEnginevLLM(LMMEngine):
         self.llm_client = None
         self.temperature = temperature
 
+    @observe(as_type="generation")
     @backoff.on_exception(
         backoff.expo, (APIConnectionError, APIError, RateLimitError), max_time=60
     )
@@ -159,6 +171,10 @@ class LMMEnginevLLM(LMMEngine):
         max_new_tokens=512,
         **kwargs,
     ):
+        langfuse = get_client()
+        langfuse.update_current_span(
+            metadata={"engine": "vllm", "model": self.model}
+        )
         api_key = self.api_key or os.getenv("vLLM_API_KEY")
         if api_key is None:
             raise ValueError(
