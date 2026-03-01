@@ -15,15 +15,17 @@ keywords = ["ai", "llm", "gui", "agent", "multimodal", "cua", "cortex"]
 dependencies = [
     "numpy",
     "backoff",
-    "openai",           # OpenAI, Azure OpenAI, and vLLM all use openai SDK
-    "langfuse",         # LLM observability & tracing
-    "pyautogui",        # Screen interaction
-    "pillow",           # Image processing (PIL)
-    "pytesseract",      # OCR for grounding
-    "python-dotenv",    # .env file loading
+    "openai", # OpenAI, Azure OpenAI, and vLLM all use openai SDK
+    "langfuse", # LLM observability & tracing
+    "pyautogui", # Screen interaction
+    "pillow", # Image processing (PIL)
+    "pytesseract", # OCR for grounding
+    "python-dotenv", # .env file loading
     "pywinauto; sys_platform == 'win32'",
     "pywin32; sys_platform == 'win32'",
     "pyobjc; sys_platform == 'darwin'",
+    "fastapi>=0.128.8",
+    "uvicorn[standard]>=0.39.0",
 ]
 
 [project.optional-dependencies]

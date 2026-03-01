@@ -13,6 +13,8 @@ import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from langfuse import get_client
+from langfuse.decorators import observe
 import uvicorn
 
 # Load .env from the CORTEX root directory
@@ -89,9 +91,14 @@ def _show_ui() -> None:
 
 # ── Agent runner (background thread) ─────────────────────────────────────────
 
+@observe(name="cortex_run")
 def _run_agent(task: str) -> None:
     global _agent_running
     try:
+        # Set the Langfuse trace name to the task instruction
+        langfuse = get_client()
+        langfuse.update_current_trace(name=task)
+
         log_to_ui(f"Task: {task}", "info", "📋")
         set_status("running")
 
@@ -234,6 +241,11 @@ def _run_agent(task: str) -> None:
         log_to_ui(f"Error: {exc}", "error", "❌")
         set_status("error")
     finally:
+        # Flush all Langfuse events before thread exits
+        try:
+            get_client().flush()
+        except Exception:
+            pass
         print(f"[{time.strftime('%H:%M:%S')}] Agent thread finished.", flush=True)
         _agent_running = False
         _stop_flag.clear()
