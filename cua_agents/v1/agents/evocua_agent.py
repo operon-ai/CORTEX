@@ -37,7 +37,7 @@ _S2_ACTION_DESCRIPTION = """
 * `middle_click`: Click the middle mouse button at a specified (x, y) pixel coordinate on the screen.
 * `double_click`: Double-click the left mouse button at a specified (x, y) pixel coordinate on the screen.
 * `triple_click`: Triple-click the left mouse button at a specified (x, y) pixel coordinate on the screen.
-* `scroll`: Performs a scroll of the mouse scroll wheel.
+* `scroll`: Performs a scroll of the mouse scroll wheel. Use positive values to scroll up and negative values to scroll down.
 * `wait`: Wait specified seconds for the change to happen.
 * `terminate`: Terminate the current task and report its completion status.
 """
@@ -49,6 +49,72 @@ _S2_DESCRIPTION_TEMPLATE = """Use a mouse and keyboard to interact with a comput
 * Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.
 * If you tried clicking on a program or link but it failed to load even after waiting, try adjusting your cursor position so that the tip of the cursor visually falls on the element that you want to click.
 * Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked."""
+
+# General computer-use knowledge injected into the system prompt
+_COMPUTER_USE_GUIDELINES = """
+# Computer Use Guidelines
+
+## Desktop & App Launching
+- On Windows, desktop icons require DOUBLE-CLICK to open. Single-clicking only selects them.
+- Taskbar icons (bottom bar) require a single left-click to open or switch to an app.
+- To open an app not on the desktop: click the Windows Start button (bottom-left) or press the Windows key, then type the app name to search for it.
+- If an app is minimized, click its icon in the taskbar to restore it.
+- If an app is behind another window, click its taskbar icon to bring it to the front.
+- After launching an application, WAIT at least 2-3 seconds for it to fully load before interacting with it.
+
+## Windows Search
+- Press the Windows key to open Start Menu, then type to search for apps, files, or settings.
+- The Windows search bar may also be visible in the taskbar — click it and type.
+- After typing a search query, wait briefly for results to appear, then click the appropriate result.
+
+## Keyboard Shortcuts (Windows)
+- Alt+Tab: Switch between open windows.
+- Alt+F4: Close the current window.
+- Ctrl+C / Ctrl+V: Copy / Paste.
+- Ctrl+A: Select all text.
+- Ctrl+Z / Ctrl+Y: Undo / Redo.
+- Ctrl+W: Close the current tab (in browsers and many apps).
+- Ctrl+T: Open a new tab (in browsers).
+- Ctrl+L or F6: Focus the address/URL bar in browsers.
+- Win+D: Show desktop (minimize all windows).
+- Win+E: Open File Explorer.
+- Enter: Confirm/submit the current action (press a button, submit a form, open a selected item).
+- Escape: Cancel/close the current dialog or popup.
+
+## Browser Usage
+- To navigate to a URL: click the address bar (or press Ctrl+L), clear it, type the URL, and press Enter.
+- To search: click the address bar, type your query, and press Enter.
+- Use Ctrl+T for a new tab, Ctrl+W to close the current tab.
+- To go back: click the back arrow or press Alt+Left.
+- Bookmarks and pinned sites may appear on the new tab page.
+- Web pages may take a few seconds to load — wait before interacting with page elements.
+- If a page element isn't responding to clicks, try scrolling to make it fully visible first.
+
+## Text Input
+- Before typing, you MUST click on the text field to focus it (the cursor should be blinking in the field).
+- To clear an existing text field: triple-click to select all text, then type the new text.
+- Alternatively, use Ctrl+A to select all text in a focused field, then type to replace.
+- For search bars, usually clicking and typing directly works; the previous text gets replaced.
+
+## Scroll Behavior
+- Use positive scroll values to scroll UP (content moves down) and negative values to scroll DOWN (content moves up).
+- Many apps and web pages require scrolling to see all content.
+- If a button or element is not visible, try scrolling down to find it.
+
+## File Management
+- Right-click on the desktop or in File Explorer for context menus (New, Open, Properties, etc.).
+- Double-click folders to open them in File Explorer.
+- File paths on Windows use backslashes: C:\\Users\\...
+
+## Common Pitfalls to Avoid
+- Do NOT try to interact with elements that are behind other windows — bring the target window to the front first.
+- Do NOT keep waiting (action=wait) if nothing is changing — try a different approach.
+- Do NOT click on the same unresponsive element repeatedly — try a different way to accomplish the goal.
+- If a dialog/popup appears, handle it first before continuing with the main task.
+- If you see an error message, read it carefully before deciding the next action.
+- Never assume a task is done without visual confirmation on the screen.
+- If you are unsure of the name of any app, either hover over it and check the name or use the search bar in the start menu to search for it.
+"""
 
 
 def _build_tools_def(description_prompt: str) -> dict:
@@ -103,6 +169,8 @@ For each function call, return a json object with function name and arguments wi
 {{"name": <function-name>, "arguments": <args-json-object>}}
 </tool_call>
 
+{computer_guidelines}
+
 Response format for every step:
 1) Action: a short imperative describing what to do in the UI.
 2) A single <tool_call>...</tool_call> block containing only the JSON: {{"name": <function-name>, "arguments": <args-json-object>}}.
@@ -111,7 +179,9 @@ Rules:
 - Output exactly in the order: Action, <tool_call>.
 - Be brief: one sentence for Action.
 - Do not output anything else outside those parts.
-- If finishing, use action=terminate in the tool call."""
+- If finishing, use action=terminate in the tool call.
+- Verify each action visually before moving to the next step.
+- If an action did not produce the expected result, try an alternative approach."""
 
 
 # ─── Image processing ───────────────────────────────────────────────────────
@@ -186,17 +256,24 @@ class EvoCUAAgent:
         resolution_info = "* The screen's resolution is 1000x1000."
         desc = _S2_DESCRIPTION_TEMPLATE.format(resolution_info=resolution_info)
         tools_def = _build_tools_def(desc)
-        self.system_prompt = _S2_SYSTEM_PROMPT.format(tools_xml=json.dumps(tools_def))
+        self.system_prompt = _S2_SYSTEM_PROMPT.format(
+            tools_xml=json.dumps(tools_def),
+            computer_guidelines=_COMPUTER_USE_GUIDELINES.strip(),
+        )
 
         # History
-        self._actions: List[str] = []
+        self._actions: List[str] = []       # action descriptions
+        self._action_codes: List[str] = []  # raw pyautogui codes
         self._responses: List[str] = []
-        self._screenshots: List[str] = []  # base64
+        self._screenshots: List[str] = []   # base64
+        self._loop_warning: str = ""        # injected into next prompt if loop detected
 
     def reset(self):
         self._actions.clear()
+        self._action_codes.clear()
         self._responses.clear()
         self._screenshots.clear()
+        self._loop_warning = ""
 
     # ── Main entry point ─────────────────────────────────────────────────
 
@@ -240,6 +317,18 @@ class EvoCUAAgent:
         action_desc, pyautogui_codes = self._parse_response(response_text)
         print(f"[DEBUG] PARSED: action_desc={action_desc!r}, codes={pyautogui_codes}", flush=True)
         self._actions.append(action_desc)
+        self._action_codes.append(pyautogui_codes[0] if pyautogui_codes else "")
+
+        # ── Loop detection ────────────────────────────────────────────
+        loop_info = self._detect_loop()
+        if loop_info["hard_bail"]:
+            print(f"[LOOP] HARD BAIL after {loop_info['repeat_count']} identical actions", flush=True)
+            return {"action_description": "Loop detected — auto-terminating", "raw_response": response_text}, ["FAIL"]
+        if loop_info["warning"]:
+            self._loop_warning = loop_info["warning"]
+            print(f"[LOOP] Warning injected: {self._loop_warning[:80]}…", flush=True)
+        else:
+            self._loop_warning = ""
 
         # Attach screenshot + action to Langfuse span
         langfuse = get_client()
@@ -248,6 +337,7 @@ class EvoCUAAgent:
             metadata={
                 "step": len(self._actions),
                 "action": pyautogui_codes[0] if pyautogui_codes else "",
+                "loop_warning": loop_info["warning"] or None,
             },
             input={
                 "instruction": instruction,
@@ -261,6 +351,96 @@ class EvoCUAAgent:
             "raw_response": response_text,
         }
         return info, pyautogui_codes
+
+    # ── Loop detection ────────────────────────────────────────────────────
+
+    def _detect_loop(self) -> dict:
+        """
+        Analyse recent action history for loops.
+        Returns {"warning": str | "", "hard_bail": bool, "repeat_count": int}
+        """
+        codes = self._action_codes
+        result = {"warning": "", "hard_bail": False, "repeat_count": 0}
+
+        if len(codes) < 2:
+            return result
+
+        # --- Check 1: Exact same action code repeated N times ---
+        last = codes[-1]
+        streak = 1
+        for c in reversed(codes[:-1]):
+            if c == last:
+                streak += 1
+            else:
+                break
+        result["repeat_count"] = streak
+
+        if streak >= 5:
+            result["hard_bail"] = True
+            result["warning"] = f"HARD BAIL: Same action repeated {streak} times."
+            return result
+
+        if streak >= 3:
+            banned_action = self._describe_action(last)
+            result["warning"] = (
+                f"⚠️ LOOP DETECTED: You have repeated the same action "
+                f"{streak} times in a row: \"{banned_action}\".\n"
+                f"This approach is NOT working. You MUST try a completely "
+                f"different action. Do NOT repeat \"{banned_action}\" again.\n"
+                f"Look at the screenshot carefully and find a different "
+                f"element to interact with."
+            )
+            return result
+
+        # --- Check 2: Similar click coordinates (within 30px) ---
+        if len(codes) >= 3:
+            recent_coords = []
+            for c in codes[-3:]:
+                m = re.search(r'pyautogui\.(?:click|doubleClick|rightClick)\((\d+),\s*(\d+)\)', c)
+                if m:
+                    recent_coords.append((int(m.group(1)), int(m.group(2))))
+
+            if len(recent_coords) == 3:
+                xs = [c[0] for c in recent_coords]
+                ys = [c[1] for c in recent_coords]
+                x_spread = max(xs) - min(xs)
+                y_spread = max(ys) - min(ys)
+                if x_spread <= 30 and y_spread <= 30:
+                    result["warning"] = (
+                        f"⚠️ LOOP DETECTED: You have clicked on nearly the same "
+                        f"spot ({recent_coords[-1]}) for the last 3 steps.\n"
+                        f"The click target may be wrong. Carefully re-examine the "
+                        f"screenshot and click on a DIFFERENT element."
+                    )
+                    return result
+
+        # --- Check 3: Alternating pattern (A-B-A-B) ---
+        if len(codes) >= 4:
+            if codes[-1] == codes[-3] and codes[-2] == codes[-4] and codes[-1] != codes[-2]:
+                result["warning"] = (
+                    f"⚠️ LOOP DETECTED: You are alternating between two actions "
+                    f"without making progress. Break the cycle by trying a "
+                    f"completely different approach to accomplish the task."
+                )
+                return result
+
+        return result
+
+    @staticmethod
+    def _describe_action(code: str) -> str:
+        """Human-readable description of a pyautogui action code."""
+        if code == "WAIT":
+            return "wait"
+        if code in ("DONE", "FAIL"):
+            return code.lower()
+        m = re.search(r'pyautogui\.(\w+)\(', code)
+        if m:
+            func = m.group(1)
+            coord = re.search(r'\((\d+),\s*(\d+)\)', code)
+            if coord:
+                return f"{func} at ({coord.group(1)}, {coord.group(2)})"
+            return func
+        return code[:60]
 
     # ── Message building ─────────────────────────────────────────────────
 
@@ -279,6 +459,11 @@ class EvoCUAAgent:
             if i < len(self._actions):
                 prev_actions.append(f"Step {i + 1}: {self._actions[i]}")
         prev_str = "\n".join(prev_actions) if prev_actions else "None"
+
+        # Build loop warning suffix
+        loop_suffix = ""
+        if self._loop_warning:
+            loop_suffix = f"\n\n{self._loop_warning}"
 
         # Add historical turns (screenshot + response)
         if history_n > 0:
@@ -315,7 +500,7 @@ class EvoCUAAgent:
                     "content": [{"type": "text", "text": hist_responses[i]}],
                 })
 
-        # Current turn
+        # Current turn — inject loop warning if present
         img_url = f"data:image/png;base64,{current_img_b64}"
         if history_n == 0:
             prompt = (
@@ -323,6 +508,7 @@ class EvoCUAAgent:
                 f"UI screenshot, instruction and previous actions.\n\n"
                 f"Instruction: {instruction}\n\n"
                 f"Previous actions:\n{prev_str}"
+                f"{loop_suffix}"
             )
             messages.append({
                 "role": "user",
@@ -332,12 +518,22 @@ class EvoCUAAgent:
                 ],
             })
         else:
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": img_url}},
-                ],
-            })
+            if loop_suffix:
+                # Need to add text alongside the image
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": img_url}},
+                        {"type": "text", "text": loop_suffix.strip()},
+                    ],
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": img_url}},
+                    ],
+                })
 
         return messages
 
