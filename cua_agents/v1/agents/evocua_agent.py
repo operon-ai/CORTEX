@@ -17,7 +17,7 @@ from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
-from langfuse.decorators import observe
+from langfuse import observe, get_client
 from openai import OpenAI
 
 logger = logging.getLogger("cortex.evocua")
@@ -233,11 +233,28 @@ class EvoCUAAgent:
             return {"error": str(e)}, ["FAIL"]
 
         logger.info("EvoCUA raw response: %s", response_text[:500])
+        print(f"[DEBUG] RAW RESPONSE:\n{response_text}\n[/DEBUG]", flush=True)
         self._responses.append(response_text)
 
         # Parse tool call → pyautogui code
         action_desc, pyautogui_codes = self._parse_response(response_text)
+        print(f"[DEBUG] PARSED: action_desc={action_desc!r}, codes={pyautogui_codes}", flush=True)
         self._actions.append(action_desc)
+
+        # Attach screenshot + action to Langfuse span
+        langfuse = get_client()
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        langfuse.update_current_span(
+            metadata={
+                "step": len(self._actions),
+                "action": pyautogui_codes[0] if pyautogui_codes else "",
+            },
+            input={
+                "instruction": instruction,
+                "screenshot": f"data:image/png;base64,{screenshot_b64}",
+            },
+            output=response_text,
+        )
 
         info = {
             "action_description": action_desc,
@@ -340,6 +357,11 @@ class EvoCUAAgent:
 
         if not response or not response.strip():
             return action_desc, codes
+
+        # Strip <think>...</think> chain-of-thought blocks
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+        # Also handle case where opening <think> is missing but </think> is present
+        response = re.sub(r"^.*?</think>", "", response, flags=re.DOTALL).strip()
 
         # Extract action description (text before <tool_call>)
         tc_match = re.search(r"<tool_call>", response)

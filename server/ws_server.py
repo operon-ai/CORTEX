@@ -13,8 +13,7 @@ import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from langfuse import get_client
-from langfuse.decorators import observe
+from langfuse import get_client, observe
 import uvicorn
 
 # Load .env from the CORTEX root directory
