@@ -103,94 +103,58 @@ def _run_agent(task: str) -> None:
         set_status("running")
 
         try:
-            log_to_ui("Initializing agent…", "info", "⚙️")
+            log_to_ui("Initializing EvoCUA agent…", "info", "⚙️")
             print(f"[{time.strftime('%H:%M:%S')}] Importing dependencies...", flush=True)
             import io
             import platform as plat
 
             import pyautogui
             from PIL import Image
-            from cua_agents.v1.agents.cortex import Cortex
-            from cua_agents.v1.agents.grounding import OSWorldACI
+            from cua_agents.v1.agents.evocua_agent import EvoCUAAgent
             print(f"[{time.strftime('%H:%M:%S')}] All imports OK.", flush=True)
 
-            current_platform = plat.system().lower()  # 'windows', 'darwin', 'linux'
+            current_platform = plat.system().lower()
             print(f"[{time.strftime('%H:%M:%S')}] Platform: {current_platform}", flush=True)
 
             # Screen dimensions
             screen_width, screen_height = pyautogui.size()
-            max_dim = 2400
-            scale = min(max_dim / screen_width, max_dim / screen_height, 1)
-            scaled_w = int(screen_width * scale)
-            scaled_h = int(screen_height * scale)
-            log_to_ui(f"Screen: {screen_width}x{screen_height} → {scaled_w}x{scaled_h}", "info", "🖥️")
+            log_to_ui(f"Screen: {screen_width}x{screen_height}", "info", "🖥️")
 
-            # ── Engine params ─────────────────────────────────────────────
-            provider = os.environ["PROVIDER"]
-            model = os.environ["MODEL"]
-            engine_params: dict = {
-                "engine_type": provider,
-                "model": model,
-                "base_url": os.environ.get("MODEL_URL", ""),
-                "api_key": os.environ.get("AZURE_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
-                "temperature": None,  # use model default (avoids temperature=0.0 rejection)
-            }
-            # Azure-specific extras
-            azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-            if azure_endpoint:
-                engine_params["azure_endpoint"] = azure_endpoint
-            api_version = os.environ.get("OPENAI_API_VERSION", "")
-            if api_version:
-                engine_params["api_version"] = api_version
+            # ── EvoCUA config ─────────────────────────────────────────────
+            evocua_url = os.environ["GROUND_URL"]
+            evocua_model = os.environ["GROUND_MODEL"]
+            evocua_key = os.environ.get("GROUND_API_KEY", "any-value")
+            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA: model={evocua_model}", flush=True)
+            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA URL: {evocua_url}", flush=True)
 
-            print(f"[{time.strftime('%H:%M:%S')}] Engine: provider={provider}, model={model}", flush=True)
-
-            engine_params_for_grounding = {
-                "engine_type": os.environ["GROUND_PROVIDER"],
-                "model": os.environ["GROUND_MODEL"],
-                "base_url": os.environ["GROUND_URL"],
-                "api_key": os.environ.get("GROUND_API_KEY", "any-value"),
-                "grounding_width": int(os.environ.get("GROUNDING_WIDTH", "1920")),
-                "grounding_height": int(os.environ.get("GROUNDING_HEIGHT", "1080")),
-            }
-            print(f"[{time.strftime('%H:%M:%S')}] Grounding: {engine_params_for_grounding['engine_type']} / {engine_params_for_grounding['model']}", flush=True)
-            print(f"[{time.strftime('%H:%M:%S')}] Grounding URL: {engine_params_for_grounding['base_url']}", flush=True)
-
-            # ── Initialize agents ─────────────────────────────────────────
-            print(f"[{time.strftime('%H:%M:%S')}] Creating OSWorldACI...", flush=True)
-            grounding_agent = OSWorldACI(
-                env=None,
-                platform=current_platform,
-                engine_params_for_generation=engine_params,
-                engine_params_for_grounding=engine_params_for_grounding,
-                width=screen_width,
-                height=screen_height,
-            )
-            print(f"[{time.strftime('%H:%M:%S')}] Grounding agent ready.", flush=True)
-
-            print(f"[{time.strftime('%H:%M:%S')}] Creating Cortex agent...", flush=True)
-            agent = Cortex(
-                engine_params,
-                grounding_agent,
-                platform=current_platform,
+            # ── Initialize agent ──────────────────────────────────────────
+            agent = EvoCUAAgent(
+                base_url=evocua_url,
+                model=evocua_model,
+                api_key=evocua_key,
+                screen_size=(screen_width, screen_height),
+                max_history=4,
+                temperature=0.01,
+                resize_factor=32,
             )
             agent.reset()
-            print(f"[{time.strftime('%H:%M:%S')}] Cortex agent ready.", flush=True)
+            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA agent ready.", flush=True)
 
             log_to_ui("Agent initialized. Starting task.", "success", "✅")
 
             # ── Run loop ──────────────────────────────────────────────────
-            for step in range(15):
+            max_steps = 30  # EvoCUA supports up to 50, we use 30
+            for step in range(max_steps):
                 if _stop_flag.is_set():
                     log_to_ui("Stopped by user.", "warning", "⏹️")
                     break
 
-                log_to_ui(f"Step {step + 1}/15: Capturing screen…", "step", "📷")
+                log_to_ui(f"Step {step + 1}/{max_steps}: Capturing screen…", "step", "📷")
                 _hide_ui()
                 screenshot = pyautogui.screenshot()
                 _show_ui()
-                screenshot = screenshot.resize((scaled_w, scaled_h), Image.LANCZOS)
-                print(f"[{time.strftime('%H:%M:%S')}] Screenshot captured & resized to {scaled_w}x{scaled_h}", flush=True)
+                # Send the raw screenshot — EvoCUA handles its own resizing via smart_resize
+                print(f"[{time.strftime('%H:%M:%S')}] Screenshot captured: {screen_width}x{screen_height}", flush=True)
 
                 buffered = io.BytesIO()
                 screenshot.save(buffered, format="PNG")
@@ -206,20 +170,16 @@ def _run_agent(task: str) -> None:
                 action = code[0]
                 print(f"[{time.strftime('%H:%M:%S')}] Action: {action}", flush=True)
 
-                if "done" in action.lower() or "fail" in action.lower():
+                if action in ("DONE", "FAIL"):
                     log_to_ui(f"Agent finished: {action}", "success", "🎉")
                     break
 
-                if "next" in action.lower():
-                    log_to_ui("Skipping to next step.", "info", "⏭️")
-                    continue
-
-                if "wait" in action.lower():
+                if action == "WAIT":
                     log_to_ui("Agent waiting 5 s…", "info", "⏳")
                     time.sleep(5)
                     continue
 
-                log_to_ui(f"Executing: {action}", "step", "🖱️")
+                log_to_ui(f"Executing: {action[:100]}…", "step", "🖱️")
                 print(f"[{time.strftime('%H:%M:%S')}] exec() → {action}", flush=True)
                 exec(action)
                 print(f"[{time.strftime('%H:%M:%S')}] exec() done, sleeping 1s", flush=True)
