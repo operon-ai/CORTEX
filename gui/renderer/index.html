@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; connect-src ws://localhost:7577; style-src 'self' 'unsafe-inline';" />
+  <link rel="stylesheet" href="style.css" />
+  <title>Cortex</title>
+</head>
+<body>
+  <div class="panel" id="panel">
+
+    <!-- Header — drag region -->
+    <header class="header" id="dragRegion">
+      <div class="brand">
+        <span class="brand-name">CORTEX</span>
+        <span class="conn-dot" id="connIndicator" data-state="disconnected"></span>
+        <span class="conn-label" id="connLabel">Offline</span>
+      </div>
+      <div class="header-right">
+        <span class="status-label" id="statusPill" data-status="idle"><span id="statusText">Idle</span></span>
+        <button class="btn-icon-only" id="btnMinimize" title="Minimize">&minus;</button>
+        <button class="btn-icon-only btn-close" id="btnClose" title="Close">&times;</button>
+      </div>
+    </header>
+
+    <!-- Input row -->
+    <div class="input-row">
+      <input
+        type="text"
+        class="task-input"
+        id="taskInput"
+        placeholder="What should I do?"
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <button class="btn-send" id="btnRun" title="Run">&#9654;</button>
+      <button class="btn-stop" id="btnStop" title="Stop" disabled>&#9632;</button>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-track" id="progressTrack">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <!-- Current step — only shows the latest one -->
+    <div class="current-step" id="feed">
+      <span class="step-idle" id="stepIdle">Ready</span>
+    </div>
+
+    <!-- Hidden elements referenced by app.ts -->
+    <span id="stepCount" style="display:none">0</span>
+
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

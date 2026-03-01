@@ -126,14 +126,19 @@ class LMMEngineAzureOpenAI(LMMEngine):
                 api_key=api_key,
                 api_version=api_version,
             )
+        # Use self.temperature if set, otherwise use the temperature argument.
+        # Some Azure models (e.g. gpt-5-mini) only support the default temperature (1);
+        # omit the parameter entirely when we would send 0.0 so the API uses its default.
         temp = self.temperature if self.temperature is not None else temperature
-        completion = self.llm_client.chat.completions.create(
+        create_kwargs: dict = dict(
             model=self.model,
             messages=messages,
             max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
-            temperature=temp,
             **kwargs,
         )
+        if temp != 0.0:
+            create_kwargs["temperature"] = temp
+        completion = self.llm_client.chat.completions.create(**create_kwargs)
         self.cost += 0.02 * ((completion.usage.total_tokens + 500) / 1000)
         return completion.choices[0].message.content
 
