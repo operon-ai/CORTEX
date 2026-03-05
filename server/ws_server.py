@@ -31,12 +31,26 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 _clients: list[WebSocket] = []
 _agent_running = False
 _stop_flag = threading.Event()
+_cortex = None
 
 
 @app.on_event("startup")
-async def _capture_loop() -> None:
-    global _event_loop
+async def _on_startup() -> None:
+    global _event_loop, _cortex
     _event_loop = asyncio.get_running_loop()
+
+    # Pre-initialize the Cortex orchestrator early
+    log_to_ui("Pre-initializing Cortex orchestrator and agents…", "info", "⚙️")
+    from cua_agents.v1.agents.cortex import Cortex
+    _cortex = Cortex(
+        max_steps=30,
+        hide_ui=_hide_ui,
+        show_ui=_show_ui,
+        stop_flag=_stop_flag,
+        log_fn=log_to_ui,
+    )
+    # Perform warm-up (connect MCP, start agents)
+    await _cortex.warm_up()
 
 
 # ── Broadcast helpers (thread-safe) ──────────────────────────────────────────
@@ -94,7 +108,7 @@ def _show_ui() -> None:
 def _run_agent(task: str) -> None:
     global _agent_running
     try:
-        # Set the Langfuse trace name to the task instruction
+        # Set the Langfuse trace name
         langfuse = get_client()
         langfuse.update_current_trace(name=task)
 
@@ -102,88 +116,15 @@ def _run_agent(task: str) -> None:
         set_status("running")
 
         try:
-            log_to_ui("Initializing EvoCUA agent…", "info", "⚙️")
-            print(f"[{time.strftime('%H:%M:%S')}] Importing dependencies...", flush=True)
-            import io
-            import platform as plat
+            # Run the orchestrator graph using the pre-initialized global instance
+            if _cortex is None:
+                log_to_ui("Error: Cortex not initialized.", "error", "❌")
+                return
 
-            import pyautogui
-            from PIL import Image
-            from cua_agents.v1.agents.evocua_agent import EvoCUAAgent
-            print(f"[{time.strftime('%H:%M:%S')}] All imports OK.", flush=True)
+            log_to_ui("Starting orchestrator loop…", "success", "🚀")
+            final_state = _cortex.run(task)
 
-            current_platform = plat.system().lower()
-            print(f"[{time.strftime('%H:%M:%S')}] Platform: {current_platform}", flush=True)
-
-            # Screen dimensions
-            screen_width, screen_height = pyautogui.size()
-            log_to_ui(f"Screen: {screen_width}x{screen_height}", "info", "🖥️")
-
-            # ── EvoCUA config ─────────────────────────────────────────────
-            evocua_url = os.environ["GROUND_URL"]
-            evocua_model = os.environ["GROUND_MODEL"]
-            evocua_key = os.environ.get("GROUND_API_KEY", "any-value")
-            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA: model={evocua_model}", flush=True)
-            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA URL: {evocua_url}", flush=True)
-
-            # ── Initialize agent ──────────────────────────────────────────
-            agent = EvoCUAAgent(
-                base_url=evocua_url,
-                model=evocua_model,
-                api_key=evocua_key,
-                screen_size=(screen_width, screen_height),
-                max_history=4,
-                temperature=0.01,
-                resize_factor=32,
-            )
-            agent.reset()
-            print(f"[{time.strftime('%H:%M:%S')}] EvoCUA agent ready.", flush=True)
-
-            log_to_ui("Agent initialized. Starting task.", "success", "✅")
-
-            # ── Run loop ──────────────────────────────────────────────────
-            max_steps = 30  # EvoCUA supports up to 50, we use 30
-            for step in range(max_steps):
-                if _stop_flag.is_set():
-                    log_to_ui("Stopped by user.", "warning", "⏹️")
-                    break
-
-                log_to_ui(f"Step {step + 1}/{max_steps}: Capturing screen…", "step", "📷")
-                _hide_ui()
-                screenshot = pyautogui.screenshot()
-                _show_ui()
-                # Send the raw screenshot — EvoCUA handles its own resizing via smart_resize
-                print(f"[{time.strftime('%H:%M:%S')}] Screenshot captured: {screen_width}x{screen_height}", flush=True)
-
-                buffered = io.BytesIO()
-                screenshot.save(buffered, format="PNG")
-                img_size_kb = len(buffered.getvalue()) / 1024
-                obs = {"screenshot": buffered.getvalue()}
-                print(f"[{time.strftime('%H:%M:%S')}] Image encoded: {img_size_kb:.0f} KB", flush=True)
-
-                log_to_ui("Agent is thinking…", "step", "🧠")
-                print(f"[{time.strftime('%H:%M:%S')}] Calling agent.predict()...", flush=True)
-                info, code = agent.predict(instruction=task, observation=obs)
-                print(f"[{time.strftime('%H:%M:%S')}] agent.predict() returned. code={code}", flush=True)
-
-                action = code[0]
-                print(f"[{time.strftime('%H:%M:%S')}] Action: {action}", flush=True)
-
-                if action in ("DONE", "FAIL"):
-                    log_to_ui(f"Agent finished: {action}", "success", "🎉")
-                    break
-
-                if action == "WAIT":
-                    log_to_ui("Agent waiting 5 s…", "info", "⏳")
-                    time.sleep(5)
-                    continue
-
-                log_to_ui(f"Executing: {action[:100]}…", "step", "🖱️")
-                print(f"[{time.strftime('%H:%M:%S')}] exec() → {action}", flush=True)
-                exec(action)
-                print(f"[{time.strftime('%H:%M:%S')}] exec() done, sleeping 1s", flush=True)
-                time.sleep(1)
-
+            # Clean up
             set_status("done")
 
         except Exception as exc:
@@ -200,7 +141,6 @@ def _run_agent(task: str) -> None:
         log_to_ui(f"Error: {exc}", "error", "❌")
         set_status("error")
     finally:
-        # Flush all Langfuse events before thread exits
         try:
             get_client().flush()
         except Exception:

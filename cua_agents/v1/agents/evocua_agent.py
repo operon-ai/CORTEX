@@ -20,101 +20,20 @@ from PIL import Image
 from langfuse import observe, get_client
 from openai import OpenAI
 
+from cua_agents.v1.agents.prompts import (
+    EVOCUA_ACTION_DESCRIPTION,
+    EVOCUA_DESCRIPTION_TEMPLATE,
+    COMPUTER_USE_GUIDELINES,
+    EVOCUA_SYSTEM_PROMPT,
+    GUI_SUMMARY_PROMPT,
+)
+
 logger = logging.getLogger("cortex.evocua")
 
 
 # ─── S2 prompt fragments (adapted from meituan/EvoCUA) ──────────────────────
 
-_S2_ACTION_DESCRIPTION = """
-* `key`: Performs key down presses on the arguments passed in order, then performs key releases in reverse order.
-* `key_down`: Press and HOLD the specified key(s) down in order (no release). Use this for stateful holds like holding Shift while clicking.
-* `key_up`: Release the specified key(s) in reverse order.
-* `type`: Type a string of text on the keyboard.
-* `mouse_move`: Move the cursor to a specified (x, y) pixel coordinate on the screen.
-* `left_click`: Click the left mouse button at a specified (x, y) pixel coordinate on the screen.
-* `left_click_drag`: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.
-* `right_click`: Click the right mouse button at a specified (x, y) pixel coordinate on the screen.
-* `middle_click`: Click the middle mouse button at a specified (x, y) pixel coordinate on the screen.
-* `double_click`: Double-click the left mouse button at a specified (x, y) pixel coordinate on the screen.
-* `triple_click`: Triple-click the left mouse button at a specified (x, y) pixel coordinate on the screen.
-* `scroll`: Performs a scroll of the mouse scroll wheel. Use positive values to scroll up and negative values to scroll down.
-* `wait`: Wait specified seconds for the change to happen.
-* `terminate`: Terminate the current task and report its completion status.
-"""
 
-_S2_DESCRIPTION_TEMPLATE = """Use a mouse and keyboard to interact with a computer, and take screenshots.
-* This is an interface to a desktop GUI. You must click on desktop icons to start applications.
-* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions.
-{resolution_info}
-* Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.
-* If you tried clicking on a program or link but it failed to load even after waiting, try adjusting your cursor position so that the tip of the cursor visually falls on the element that you want to click.
-* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked."""
-
-# General computer-use knowledge injected into the system prompt
-_COMPUTER_USE_GUIDELINES = """
-# Computer Use Guidelines
-
-## Desktop & App Launching
-- On Windows, desktop icons require DOUBLE-CLICK to open. Single-clicking only selects them.
-- Taskbar icons (bottom bar) require a single left-click to open or switch to an app.
-- To open an app not on the desktop: click the Windows Start button (bottom-left) or press the Windows key, then type the app name to search for it.
-- If an app is minimized, click its icon in the taskbar to restore it.
-- If an app is behind another window, click its taskbar icon to bring it to the front.
-- After launching an application, WAIT at least 2-3 seconds for it to fully load before interacting with it.
-
-## Windows Search
-- Press the Windows key to open Start Menu, then type to search for apps, files, or settings.
-- The Windows search bar may also be visible in the taskbar — click it and type.
-- After typing a search query, wait briefly for results to appear, then click the appropriate result.
-
-## Keyboard Shortcuts (Windows)
-- Alt+Tab: Switch between open windows.
-- Alt+F4: Close the current window.
-- Ctrl+C / Ctrl+V: Copy / Paste.
-- Ctrl+A: Select all text.
-- Ctrl+Z / Ctrl+Y: Undo / Redo.
-- Ctrl+W: Close the current tab (in browsers and many apps).
-- Ctrl+T: Open a new tab (in browsers).
-- Ctrl+L or F6: Focus the address/URL bar in browsers.
-- Win+D: Show desktop (minimize all windows).
-- Win+E: Open File Explorer.
-- Enter: Confirm/submit the current action (press a button, submit a form, open a selected item).
-- Escape: Cancel/close the current dialog or popup.
-
-## Browser Usage
-- To navigate to a URL: click the address bar (or press Ctrl+L), clear it, type the URL, and press Enter.
-- To search: click the address bar, type your query, and press Enter.
-- Use Ctrl+T for a new tab, Ctrl+W to close the current tab.
-- To go back: click the back arrow or press Alt+Left.
-- Bookmarks and pinned sites may appear on the new tab page.
-- Web pages may take a few seconds to load — wait before interacting with page elements.
-- If a page element isn't responding to clicks, try scrolling to make it fully visible first.
-
-## Text Input
-- Before typing, you MUST click on the text field to focus it (the cursor should be blinking in the field).
-- To clear an existing text field: triple-click to select all text, then type the new text.
-- Alternatively, use Ctrl+A to select all text in a focused field, then type to replace.
-- For search bars, usually clicking and typing directly works; the previous text gets replaced.
-
-## Scroll Behavior
-- Use positive scroll values to scroll UP (content moves down) and negative values to scroll DOWN (content moves up).
-- Many apps and web pages require scrolling to see all content.
-- If a button or element is not visible, try scrolling down to find it.
-
-## File Management
-- Right-click on the desktop or in File Explorer for context menus (New, Open, Properties, etc.).
-- Double-click folders to open them in File Explorer.
-- File paths on Windows use backslashes: C:\\Users\\...
-
-## Common Pitfalls to Avoid
-- Do NOT try to interact with elements that are behind other windows — bring the target window to the front first.
-- Do NOT keep waiting (action=wait) if nothing is changing — try a different approach.
-- Do NOT click on the same unresponsive element repeatedly — try a different way to accomplish the goal.
-- If a dialog/popup appears, handle it first before continuing with the main task.
-- If you see an error message, read it carefully before deciding the next action.
-- Never assume a task is done without visual confirmation on the screen.
-- If you are unsure of the name of any app, either hover over it and check the name or use the search bar in the start menu to search for it.
-"""
 
 
 def _build_tools_def(description_prompt: str) -> dict:
@@ -126,7 +45,7 @@ def _build_tools_def(description_prompt: str) -> dict:
             "parameters": {
                 "properties": {
                     "action": {
-                        "description": _S2_ACTION_DESCRIPTION,
+                        "description": EVOCUA_ACTION_DESCRIPTION,
                         "enum": [
                             "key", "type", "mouse_move",
                             "left_click", "left_click_drag",
@@ -155,33 +74,7 @@ def _build_tools_def(description_prompt: str) -> dict:
     }
 
 
-_S2_SYSTEM_PROMPT = """# Tools
 
-You may call one or more functions to assist with the user query.
-
-You are provided with function signatures within <tools></tools> XML tags:
-<tools>
-{tools_xml}
-</tools>
-
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{{"name": <function-name>, "arguments": <args-json-object>}}
-</tool_call>
-
-{computer_guidelines}
-
-Response format for every step:
-1) Action: a short imperative describing what to do in the UI.
-2) A single <tool_call>...</tool_call> block containing only the JSON: {{"name": <function-name>, "arguments": <args-json-object>}}.
-
-Rules:
-- Output exactly in the order: Action, <tool_call>.
-- Be brief: one sentence for Action.
-- Do not output anything else outside those parts.
-- If finishing, use action=terminate in the tool call.
-- Verify each action visually before moving to the next step.
-- If an action did not produce the expected result, try an alternative approach."""
 
 
 # ─── Image processing ───────────────────────────────────────────────────────
@@ -239,6 +132,7 @@ class EvoCUAAgent:
         self,
         base_url: str,
         model: str,
+        workspace: str,
         api_key: str = "any-value",
         screen_size: Tuple[int, int] = (1920, 1080),
         max_history: int = 4,
@@ -254,11 +148,12 @@ class EvoCUAAgent:
 
         # Build the system prompt once (resolution is always 1000×1000 for relative coords)
         resolution_info = "* The screen's resolution is 1000x1000."
-        desc = _S2_DESCRIPTION_TEMPLATE.format(resolution_info=resolution_info)
+        desc = EVOCUA_DESCRIPTION_TEMPLATE.format(resolution_info=resolution_info)
         tools_def = _build_tools_def(desc)
-        self.system_prompt = _S2_SYSTEM_PROMPT.format(
+        self.system_prompt = EVOCUA_SYSTEM_PROMPT.format(
             tools_xml=json.dumps(tools_def),
-            computer_guidelines=_COMPUTER_USE_GUIDELINES.strip(),
+            computer_guidelines=COMPUTER_USE_GUIDELINES.strip(),
+            workspace=workspace
         )
 
         # History
@@ -351,6 +246,45 @@ class EvoCUAAgent:
             "raw_response": response_text,
         }
         return info, pyautogui_codes
+
+    @observe(name="evocua_summarize")
+    def summarize_progress(self, instruction: str) -> str:
+        """
+        Analyze the history of actions and screenshots to tell the orchestrator
+        exactly what was done and what is left.
+        """
+        if not self._actions:
+            return "No actions were performed yet."
+
+        history_lines = []
+        for i, (action, response) in enumerate(zip(self._actions, self._responses)):
+            history_lines.append(f"Step {i+1}:\n- Action: {action}\n- Reasoning: {response[:300]}...")
+
+        history_text = "\n\n".join(history_lines)
+        
+        prompt = f"""Original Instruction: {instruction}
+
+Recent Action History:
+{history_text}
+
+Analyze the history above and provide a detailed status for the orchestrator."""
+
+        try:
+            # Use a slightly more capable model or the same one for summary
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": GUI_SUMMARY_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            summary = completion.choices[0].message.content or "Failed to generate summary."
+            return summary
+        except Exception as e:
+            logger.error("Summary generation failed: %s", e)
+            return f"Error generating summary: {e}. Last action: {self._actions[-1] if self._actions else 'None'}"
 
     # ── Loop detection ────────────────────────────────────────────────────
 
@@ -646,19 +580,10 @@ class EvoCUAAgent:
 
             elif action == "type":
                 text = args.get("text", "")
-                # Convert to per-character presses (EvoCUA style, avoids encoding issues)
-                press_cmds = []
-                for ch in text:
-                    if ch == "\n":
-                        press_cmds.append("pyautogui.press('enter')")
-                    elif ch == "'":
-                        press_cmds.append('pyautogui.press("\\\'")')
-                    elif ch == "\\":
-                        press_cmds.append("pyautogui.press('\\\\\\\\')")
-                    else:
-                        press_cmds.append(f"pyautogui.press('{ch}')")
-                if press_cmds:
-                    codes.append("import pyautogui; " + "; ".join(press_cmds))
+                if text:
+                    # Safely escape text using json.dumps for the exec() string
+                    # pyautogui.write handles newlines by pressing enter automatically
+                    codes.append(f"import pyautogui; pyautogui.write({json.dumps(text)})")
 
             elif action == "key":
                 keys = args.get("keys", [])
