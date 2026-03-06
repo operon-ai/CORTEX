@@ -353,22 +353,29 @@ def _get_mcp_config() -> dict:
         
     # Configure Slack
     slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
+    slack_team_id = os.getenv("SLACK_TEAM_ID")
     slack_app_token = os.getenv("SLACK_APP_TOKEN")
-    # For some implementations xoxp/user token works too, but we prioritize the bot config we know we have
-    if slack_bot_token:
+    if slack_bot_token and slack_team_id:
         slack_env = {
             "SLACK_BOT_TOKEN": slack_bot_token,
-            "SLACK_TEAM_ID": os.getenv("SLACK_TEAM_ID", "T0000000") # Dummy to prevent instant crash
+            "SLACK_TEAM_ID": slack_team_id,
         }
         if slack_app_token:
             slack_env["SLACK_APP_TOKEN"] = slack_app_token
-            
+        # Pass through optional xoxp token and add-message flag
+        xoxp = os.getenv("SLACK_MCP_XOXP_TOKEN")
+        if xoxp:
+            slack_env["SLACK_MCP_XOXP_TOKEN"] = xoxp
+        if os.getenv("SLACK_MCP_ADD_MESSAGE_TOOL"):
+            slack_env["SLACK_MCP_ADD_MESSAGE_TOOL"] = os.getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
+
         config["slack"] = {
             "command": npm_cmd,
-            # The community server that's still supported:
             "args": ["-y", "@modelcontextprotocol/server-slack"],
             "env": slack_env,
         }
+    elif slack_bot_token and not slack_team_id:
+        logger.warning("SLACK_BOT_TOKEN set but SLACK_TEAM_ID missing — Slack MCP disabled")
     return config
 
 
@@ -382,19 +389,28 @@ async def _ensure_tool_manager() -> ToolManager:
     return _tool_manager
 
 
+_GEMINI_UNSUPPORTED_KEYS = {
+    "$defs", "definitions", "$schema", "$comment", "$id",
+    "additionalProperties", "default", "examples", "title",
+    "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "if", "then", "else", "not", "allOf",
+}
+_GEMINI_VALID_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
+
+
 def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
-    """Recursively sanitize JSON schema to appease strict Pydantic v2 parsers (like Gemini SDK)."""
+    """Recursively sanitize JSON schema for Gemini's strict function-calling requirements."""
     if root_schema is None:
         root_schema = schema
-        
+
     if not isinstance(schema, dict):
         if isinstance(schema, list):
             return [_sanitize_schema(item, root_schema) for item in schema]
         return schema
-        
+
     s = dict(schema)
-    
-    # Resolve $ref
+
+    # Resolve $ref inline
     if "$ref" in s:
         ref_path = s["$ref"]
         if ref_path.startswith("#/"):
@@ -407,51 +423,76 @@ def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
                     break
             else:
                 return _sanitize_schema(resolved, root_schema)
-        return s
+        return {"type": "string"}  # unresolvable ref → fallback
 
-    # Simplify oneOf/anyOf
-    if "oneOf" in s and isinstance(s["oneOf"], list) and len(s["oneOf"]) > 0:
-        return _sanitize_schema(s["oneOf"][0], root_schema)
-    if "anyOf" in s and isinstance(s["anyOf"], list) and len(s["anyOf"]) > 0:
-        return _sanitize_schema(s["anyOf"][0], root_schema)
+    # Collapse oneOf/anyOf → pick first non-null concrete candidate
+    for kw in ("oneOf", "anyOf"):
+        if kw in s and isinstance(s[kw], list) and s[kw]:
+            candidates = [c for c in s[kw] if not (isinstance(c, dict) and c.get("type") == "null")]
+            chosen = candidates[0] if candidates else s[kw][0]
+            return _sanitize_schema(chosen, root_schema)
 
-    # Handle const
+    # Handle const → minimal typed schema
     if "const" in s:
         val = s["const"]
-        t = "string" if isinstance(val, str) else "integer" if isinstance(val, int) else "boolean" if isinstance(val, bool) else "object"
+        t = "string" if isinstance(val, str) else "integer" if isinstance(val, int) else "boolean" if isinstance(val, bool) else "string"
         return {"type": t, "description": f"Must be {val}"}
-    
-    # If the schema has no type but has properties, it's an object
-    if "properties" in s and "type" not in s:
-        s["type"] = "object"
-        
-    # If schema has basically nothing, default to string to satisfy type requirements
-    if not s:
-        return {"type": "string"}
-        
-    # Remove None values
-    keys_to_remove = [k for k, v in s.items() if v is None]
-    for k in keys_to_remove:
-        del s[k]
-        
-    # If type is a list (e.g., ["string", "null"]), grab the first non-null type
+
+    # Remove None values and all unsupported keys
+    for k in list(s.keys()):
+        if s[k] is None or k in _GEMINI_UNSUPPORTED_KEYS:
+            del s[k]
+
+    # Fix type if it's a list → pick first non-null
     if "type" in s and isinstance(s["type"], list):
         types = [t for t in s["type"] if t != "null"]
         s["type"] = types[0] if types else "string"
-        
-    # Special fix for Notion MCP API schemas
-    # Notion schemas often omit "type": "object" on nested properties
-    if "type" not in s and ("properties" in s or "additionalProperties" in s):
+
+    # Ensure type is a valid Gemini string
+    if "type" in s and s["type"] not in _GEMINI_VALID_TYPES:
+        del s["type"]
+
+    # Infer object type from properties
+    if "properties" in s and "type" not in s:
         s["type"] = "object"
-        
+
+    # Normalize property values that are plain strings instead of schema dicts
+    if "properties" in s and isinstance(s["properties"], dict):
+        for pk, pv in list(s["properties"].items()):
+            if isinstance(pv, str):
+                s["properties"][pk] = {"type": pv} if pv in _GEMINI_VALID_TYPES else {"type": "string"}
+
+    # Empty schema → default to string
+    if not s:
+        return {"type": "string"}
+
+    # Strip required entries whose properties don't exist
+    if "required" in s and isinstance(s["required"], list):
+        props = set(s.get("properties", {}).keys())
+        s["required"] = [r for r in s["required"] if r in props]
+        if not s["required"]:
+            del s["required"]
+
+    # Recurse into remaining values
     for k, v in list(s.items()):
         s[k] = _sanitize_schema(v, root_schema)
-        
-    # Gemini SDK hates $defs, remove it from the root at the end of resolution
-    if "$defs" in s:
-        del s["$defs"]
-            
+
     return s
+
+
+def _deep_clean_required(obj: Any) -> None:
+    """Post-pass: recursively remove required entries that don't exist in properties."""
+    if isinstance(obj, dict):
+        if "required" in obj and isinstance(obj["required"], list):
+            props = set(obj.get("properties", {}).keys())
+            obj["required"] = [r for r in obj["required"] if r in props]
+            if not obj["required"]:
+                del obj["required"]
+        for v in list(obj.values()):
+            _deep_clean_required(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            _deep_clean_required(item)
 
 
 def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
@@ -469,7 +510,8 @@ def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
             input_schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
             
         input_schema = _sanitize_schema(input_schema, input_schema)
-        
+        _deep_clean_required(input_schema)
+
         functions.append({
             "type": "function",
             "function": {

@@ -88,7 +88,8 @@ class ToolManager:
 
             except Exception as e:
                 logger.error(f"Failed to connect to MCP server '{name}': {e}")
-                raise
+                # Continue connecting other servers instead of aborting everything
+                continue
 
     async def list_all_tools(self) -> List[Dict[str, Any]]:
         """Return all tools from all connected MCP servers."""

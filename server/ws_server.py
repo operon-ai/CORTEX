@@ -227,7 +227,7 @@ async def websocket_endpoint(ws: WebSocket):
                 try:
                     await ws.send_text(json.dumps({
                         "type": "log", "level": "info",
-                        "message": "Gemini transcribing audio...",
+                        "message": "OpenAI transcribing...",
                         "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
                     }))
                     
