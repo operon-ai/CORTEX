@@ -629,6 +629,14 @@ class OSWorldACI(ACI):
         return f"import pyautogui; pyautogui.hotkey({', '.join(keys)})"
 
     @agent_action
+    def press(self, key: str):
+        """Press a single key. Use this for keys like 'backspace', 'enter', 'tab', 'esc', etc.
+        Args:
+            key:str the key to press
+        """
+        return f"import pyautogui; pyautogui.press({repr(key)})"
+
+    @agent_action
     def hold_and_press(self, hold_keys: List, press_keys: List):
         """Hold a list of keys and press a list of keys
         Args:
