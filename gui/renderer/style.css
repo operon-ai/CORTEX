@@ -199,6 +199,33 @@ html, body {
 .btn-stop:hover:not(:disabled) { background: rgba(252, 165, 165, 0.28); }
 .btn-stop:disabled { opacity: 0.2; cursor: not-allowed; }
 
+.btn-mic {
+  width: 34px; height: 34px;
+  border: none;
+  border-radius: 10px;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s var(--ease);
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-3);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+.btn-mic:hover { background: rgba(255, 255, 255, 0.14); color: var(--text-1); }
+.btn-mic.recording {
+  background: rgba(252, 100, 100, 0.30);
+  color: var(--red);
+  border-color: rgba(252, 100, 100, 0.35);
+  animation: pulse-mic 1.4s ease-in-out infinite;
+}
+@keyframes pulse-mic {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(252, 100, 100, 0.25); }
+  50%      { box-shadow: 0 0 0 6px rgba(252, 100, 100, 0); }
+}
+
 /* ── Progress ───────────────────────────────────────────── */
 .progress-track {
   height: 1px;

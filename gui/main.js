@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, session } = require('electron');
 const path = require('path');
 
 let mainWindow = null;
@@ -34,7 +34,17 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Auto-grant microphone permission for Web Speech API
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
+  createWindow();
+});
 app.on('window-all-closed', () => app.quit());
 
 ipcMain.on('close-window', () => mainWindow && mainWindow.close());

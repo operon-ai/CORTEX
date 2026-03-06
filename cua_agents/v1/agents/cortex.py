@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 import pyautogui
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
 from langfuse import observe, get_client
 
@@ -380,6 +381,78 @@ async def _ensure_tool_manager() -> ToolManager:
     return _tool_manager
 
 
+def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
+    """Recursively sanitize JSON schema to appease strict Pydantic v2 parsers (like Gemini SDK)."""
+    if root_schema is None:
+        root_schema = schema
+        
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [_sanitize_schema(item, root_schema) for item in schema]
+        return schema
+        
+    s = dict(schema)
+    
+    # Resolve $ref
+    if "$ref" in s:
+        ref_path = s["$ref"]
+        if ref_path.startswith("#/"):
+            parts = ref_path.split("/")[1:]
+            resolved = root_schema
+            for p in parts:
+                if p in resolved:
+                    resolved = resolved[p]
+                else:
+                    break
+            else:
+                return _sanitize_schema(resolved, root_schema)
+        return s
+
+    # Simplify oneOf/anyOf
+    if "oneOf" in s and isinstance(s["oneOf"], list) and len(s["oneOf"]) > 0:
+        return _sanitize_schema(s["oneOf"][0], root_schema)
+    if "anyOf" in s and isinstance(s["anyOf"], list) and len(s["anyOf"]) > 0:
+        return _sanitize_schema(s["anyOf"][0], root_schema)
+
+    # Handle const
+    if "const" in s:
+        val = s["const"]
+        t = "string" if isinstance(val, str) else "integer" if isinstance(val, int) else "boolean" if isinstance(val, bool) else "object"
+        return {"type": t, "description": f"Must be {val}"}
+    
+    # If the schema has no type but has properties, it's an object
+    if "properties" in s and "type" not in s:
+        s["type"] = "object"
+        
+    # If schema has basically nothing, default to string to satisfy type requirements
+    if not s:
+        return {"type": "string"}
+        
+    # Remove None values
+    keys_to_remove = [k for k, v in s.items() if v is None]
+    for k in keys_to_remove:
+        del s[k]
+        
+    # If type is a list (e.g., ["string", "null"]), grab the first non-null type
+    if "type" in s and isinstance(s["type"], list):
+        types = [t for t in s["type"] if t != "null"]
+        s["type"] = types[0] if types else "string"
+        
+    # Special fix for Notion MCP API schemas
+    # Notion schemas often omit "type": "object" on nested properties
+    if "type" not in s and ("properties" in s or "additionalProperties" in s):
+        s["type"] = "object"
+        
+    for k, v in list(s.items()):
+        s[k] = _sanitize_schema(v, root_schema)
+        
+    # Gemini SDK hates $defs, remove it from the root at the end of resolution
+    if "$defs" in s:
+        del s["$defs"]
+            
+    return s
+
+
 def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
     """Convert MCP tools → OpenAI function-calling schema for llm.bind(tools=...)."""
     functions = []
@@ -393,6 +466,9 @@ def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
             input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
         elif hasattr(tool, "input_schema"):
             input_schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+            
+        input_schema = _sanitize_schema(input_schema, input_schema)
+        
         functions.append({
             "type": "function",
             "function": {
@@ -515,6 +591,7 @@ def code_worker_node(state: CortexState) -> dict:
             task_instruction=full_instruction,
             screenshot=screenshot_bytes,
             env_controller=_local_controller,
+            stop_flag=_stop_flag,
         )
 
         completion = result.get("completion_reason", "UNKNOWN")
@@ -600,11 +677,9 @@ class Cortex:
         _log_fn = log_fn
 
         # Single shared LLM
-        self.llm = AzureChatOpenAI(
-            azure_deployment=os.getenv("MODEL", "gpt-5-mini"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("OPENAI_API_VERSION", "2024-12-01-preview"),
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            api_key=os.getenv("GEMINI_API_KEY"),
             temperature=1,
             max_tokens=4096,
         )
@@ -618,8 +693,8 @@ class Cortex:
         _get_code_agent()
         _get_evocua_agent()
         
-        log_fn("Cortex initialized.", "success", "✅")
-        print(f"[{time.strftime('%H:%M:%S')}] ✅ Cortex initialized (LLM: {os.getenv('MODEL', 'gpt-5-mini')})", flush=True)
+        log_fn("Cortex initialized.", "success")
+        print(f"[{time.strftime('%H:%M:%S')}] Cortex initialized (LLM: {os.getenv('MODEL', 'gpt-5-mini')})", flush=True)
 
     async def warm_up(self):
         """Pre-initialize everything: agents, MCP tools, and connections."""

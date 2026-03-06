@@ -1,4 +1,4 @@
-export {};
+export { };
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -15,8 +15,8 @@ interface StatusMessage {
   status: 'idle' | 'running' | 'done' | 'error';
 }
 
-type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' };
-type ClientMessage = { type: 'start_task'; task: string } | { type: 'stop_task' } | { type: 'ping' };
+type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' } | { type: 'transcript'; text: string };
+type ClientMessage = { type: 'start_task'; task: string } | { type: 'stop_task' } | { type: 'ping' } | { type: 'stt_audio'; data: string };
 type ConnState = 'connected' | 'connecting' | 'disconnected';
 
 declare global {
@@ -48,18 +48,19 @@ const CONN_LABELS: Record<ConnState, string> = {
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const panel       = $<HTMLDivElement>('panel');
-const taskInput   = $<HTMLInputElement>('taskInput');
-const btnRun      = $<HTMLButtonElement>('btnRun');
-const btnStop     = $<HTMLButtonElement>('btnStop');
-const btnClose    = $<HTMLButtonElement>('btnClose');
+const panel = $<HTMLDivElement>('panel');
+const taskInput = $<HTMLInputElement>('taskInput');
+const btnRun = $<HTMLButtonElement>('btnRun');
+const btnStop = $<HTMLButtonElement>('btnStop');
+const btnMic = $<HTMLButtonElement>('btnMic');
+const btnClose = $<HTMLButtonElement>('btnClose');
 const btnMinimize = $<HTMLButtonElement>('btnMinimize');
-const statusPill  = $<HTMLElement>('statusPill');
-const statusText  = $<HTMLSpanElement>('statusText');
-const connDot     = $<HTMLElement>('connIndicator');
-const connLabel   = $<HTMLSpanElement>('connLabel');
+const statusPill = $<HTMLElement>('statusPill');
+const statusText = $<HTMLSpanElement>('statusText');
+const connDot = $<HTMLElement>('connIndicator');
+const connLabel = $<HTMLSpanElement>('connLabel');
 const progressTrack = $<HTMLDivElement>('progressTrack');
-const feed        = $<HTMLDivElement>('feed');
+const feed = $<HTMLDivElement>('feed');
 const stepCountEl = $<HTMLSpanElement>('stepCount');
 
 // ── State ────────────────────────────────────────────────────────────────
@@ -71,6 +72,58 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 let stepCount = 0;
 let currentStatus = 'idle';
 
+// ── Speech Recognition (Gemini Audio API via Python Backend) ─────────────
+
+let mediaRecorder: MediaRecorder | null = null;
+let audioChunks: Blob[] = [];
+let isRecording = false;
+
+async function toggleMic(): Promise<void> {
+  if (isRecording && mediaRecorder) {
+    mediaRecorder.stop();
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Attempt to use webm or just a generic audio format depending on platform support.
+    const opts = MediaRecorder.isTypeSupported('audio/webm') ? { mimeType: 'audio/webm' } : undefined;
+    mediaRecorder = new MediaRecorder(stream, opts);
+    audioChunks = [];
+
+    mediaRecorder.addEventListener('dataavailable', (event) => {
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+    });
+
+    mediaRecorder.addEventListener('stop', () => {
+      isRecording = false;
+      btnMic.classList.remove('recording');
+
+      const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+      const reader = new FileReader();
+      reader.readAsDataURL(audioBlob);
+      reader.onloadend = () => {
+        const base64Audio = (reader.result as string).split(',')[1];
+        send({ type: 'stt_audio', data: base64Audio });
+      };
+
+      // Stop all tracks to release the microphone lock
+      stream.getTracks().forEach(track => track.stop());
+    });
+
+    mediaRecorder.start();
+    isRecording = true;
+    btnMic.classList.add('recording');
+    taskInput.value = 'Listening...';
+  } catch (error) {
+    console.error('Error accessing microphone:', error);
+    shake(taskInput);
+    taskInput.value = 'Microphone error.';
+  }
+}
+
 // ── WebSocket ────────────────────────────────────────────────────────────
 
 function connect(): void {
@@ -78,9 +131,9 @@ function connect(): void {
   setConn('connecting');
   ws = new WebSocket(WS_URL);
   ws.onopen = () => { reconnectDelay = RECONNECT_BASE; setConn('connected'); startPing(); };
-  ws.onmessage = (e: MessageEvent) => { try { handle(JSON.parse(e.data)); } catch {} };
+  ws.onmessage = (e: MessageEvent) => { try { handle(JSON.parse(e.data)); } catch { } };
   ws.onclose = () => { setConn('disconnected'); stopPing(); scheduleReconnect(); };
-  ws.onerror = () => {};
+  ws.onerror = () => { };
 }
 
 function scheduleReconnect(): void {
@@ -106,6 +159,11 @@ function handle(msg: ServerMessage): void {
   else if (msg.type === 'status') setStatus(msg.status);
   else if (msg.type === 'hide') api?.hideWindow();
   else if (msg.type === 'show') api?.showWindow();
+  else if (msg.type === 'transcript') {
+    taskInput.value = msg.text;
+    taskInput.focus();
+    startTask();
+  }
 }
 
 // ── UI ───────────────────────────────────────────────────────────────────
@@ -171,6 +229,7 @@ function startTask(): void {
 
 btnRun.addEventListener('click', startTask);
 btnStop.addEventListener('click', () => send({ type: 'stop_task' }));
+btnMic.addEventListener('click', toggleMic);
 btnClose.addEventListener('click', () => api?.closeWindow());
 btnMinimize.addEventListener('click', () => api?.minimizeWindow());
 taskInput.addEventListener('keydown', (e: KeyboardEvent) => {
