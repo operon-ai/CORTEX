@@ -77,6 +77,29 @@ _evocua_agent: Optional[EvoCUAAgent] = None
 _code_agent: Optional[CodeAgent] = None
 _local_controller: Optional[LocalController] = None
 
+# Persistent background event loop for MCP async operations.
+# MCP stdio connections are bound to a single event loop; all async MCP work
+# must run in this loop regardless of which thread calls it.
+_bg_loop: Optional[asyncio.AbstractEventLoop] = None
+_bg_thread: Optional[threading.Thread] = None
+
+
+def _get_bg_loop() -> asyncio.AbstractEventLoop:
+    """Return (or start) the persistent background event loop."""
+    global _bg_loop, _bg_thread
+    if _bg_loop is None or not _bg_loop.is_running():
+        _bg_loop = asyncio.new_event_loop()
+        _bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True, name="cortex-bg-loop")
+        _bg_thread.start()
+    return _bg_loop
+
+
+def _run_in_bg_loop(coro) -> Any:
+    """Submit *coro* to the background loop and block until it completes."""
+    loop = _get_bg_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
 # Callbacks injected by ws_server (or default no-ops)
 _hide_ui_fn: Callable[[], None] = lambda: None
 _show_ui_fn: Callable[[], None] = lambda: None
@@ -316,6 +339,8 @@ def gui_worker_node(state: CortexState) -> dict:
 def _get_mcp_config() -> dict:
     config = {}
     npm_cmd = "npx.cmd" if sys.platform == "win32" else "npx"
+    
+    # Configure Notion
     notion_token = os.getenv("NOTION_TOKEN")
     if notion_token:
         config["notion"] = {
@@ -323,15 +348,23 @@ def _get_mcp_config() -> dict:
             "args": ["-y", "@notionhq/notion-mcp-server"],
             "env": {"NOTION_TOKEN": notion_token},
         }
-    slack_token = os.getenv("SLACK_MCP_XOXP_TOKEN")
-    if slack_token:
-        slack_env = {"SLACK_MCP_XOXP_TOKEN": slack_token}
-        add_msg = os.getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
-        if add_msg:
-            slack_env["SLACK_MCP_ADD_MESSAGE_TOOL"] = add_msg
+        
+    # Configure Slack
+    slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
+    slack_app_token = os.getenv("SLACK_APP_TOKEN")
+    # For some implementations xoxp/user token works too, but we prioritize the bot config we know we have
+    if slack_bot_token:
+        slack_env = {
+            "SLACK_BOT_TOKEN": slack_bot_token,
+            "SLACK_TEAM_ID": os.getenv("SLACK_TEAM_ID", "T0000000") # Dummy to prevent instant crash
+        }
+        if slack_app_token:
+            slack_env["SLACK_APP_TOKEN"] = slack_app_token
+            
         config["slack"] = {
             "command": npm_cmd,
-            "args": ["-y", "@anthropic/slack-mcp-server"],
+            # The community server that's still supported:
+            "args": ["-y", "@modelcontextprotocol/server-slack"],
             "env": slack_env,
         }
     return config
@@ -380,15 +413,11 @@ def mcp_worker_node(state: CortexState) -> dict:
     _log_fn(f"MCP: {instruction[:100]}…", "step", "🔧")
     print(f"[{time.strftime('%H:%M:%S')}] 🔧 MCP: {instruction[:100]}", flush=True)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        result_text = loop.run_until_complete(_mcp_worker_async(instruction))
+        result_text = _run_in_bg_loop(_mcp_worker_async(instruction))
     except Exception as e:
         result_text = f"MCP error: {e}"
         logger.error("MCP error: %s", e)
-    finally:
-        loop.close()
 
     _log_fn(f"MCP result: {result_text[:150]}…", "info", "🔧")
     print(f"[{time.strftime('%H:%M:%S')}] 🔧 Result: {result_text[:200]}", flush=True)
@@ -601,7 +630,9 @@ class Cortex:
     async def initialize_mcp(self):
         """Pre-connect MCP servers and cache tool descriptions."""
         try:
-            tm = await _ensure_tool_manager()
+            # Run in the persistent bg loop so the connections stay there.
+            # asyncio.to_thread prevents blocking the caller's event loop.
+            tm = await asyncio.to_thread(_run_in_bg_loop, _ensure_tool_manager())
             self._mcp_tool_desc = tm.get_tools_description()
             _log_fn("MCP tools loaded.", "success", "🔧")
             print(f"[{time.strftime('%H:%M:%S')}] ✅ MCP:\n{self._mcp_tool_desc}", flush=True)
@@ -636,14 +667,13 @@ class Cortex:
         return final_state
 
     def shutdown(self):
-        global _tool_manager, _tool_manager_connected
+        global _tool_manager, _tool_manager_connected, _bg_loop
         if _tool_manager is not None:
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(_tool_manager.disconnect())
-                loop.close()
+                _run_in_bg_loop(_tool_manager.disconnect())
             except Exception:
                 pass
             _tool_manager = None
             _tool_manager_connected = False
+        if _bg_loop is not None and _bg_loop.is_running():
+            _bg_loop.call_soon_threadsafe(_bg_loop.stop)
