@@ -196,7 +196,7 @@ def orchestrator_node(state: CortexState) -> dict:
     try:
         response = _llm.invoke(messages)
         raw_text = response.content
-        print(f"[{time.strftime('%H:%M:%S')}] 🧠 raw: {raw_text[:300]}…", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] 🧠 raw: {raw_text}", flush=True)
 
         cleaned = raw_text.strip()
         if cleaned.startswith("```"):
@@ -215,8 +215,9 @@ def orchestrator_node(state: CortexState) -> dict:
     instruction = decision.get("instruction", "")
     reasoning = decision.get("reasoning", "")
 
-    _log_fn(f"→ {next_node}: {instruction[:100]}", "step", "🧠")
-    print(f"[{time.strftime('%H:%M:%S')}] 🧠 → {next_node}: {instruction[:120]}", flush=True)
+    str_instruction = str(instruction)
+    _log_fn(f"→ {next_node}: {str_instruction}", "step", "🧠")
+    print(f"[{time.strftime('%H:%M:%S')}] 🧠 → {next_node}: {str_instruction}", flush=True)
 
     langfuse = get_client()
     # Encode for logging purposes
@@ -263,9 +264,9 @@ def gui_worker_node(state: CortexState) -> dict:
     if _is_stopped():
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
-    instruction = state.get("_instruction", state.get("task", ""))
-    _log_fn(f"GUI Task: {instruction[:100]}…", "step", "🖱️")
-    print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI: {instruction[:100]}", flush=True)
+    instruction = str(state.get("_instruction", state.get("task", "")))
+    _log_fn(f"GUI Task: {instruction}", "step", "🖱️")
+    print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI: {instruction}", flush=True)
 
     agent = _get_evocua_agent()
     agent.reset() # Start fresh history for this delegation
@@ -286,9 +287,9 @@ def gui_worker_node(state: CortexState) -> dict:
         info, codes = agent.predict(instruction=instruction, observation={"screenshot": screenshot_bytes})
         action = codes[0] if codes else "WAIT"
         
-        desc = info.get("action_description", action)
-        _log_fn(f"Action: {desc[:100]}", "info", "▶️")
-        print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI Step {step_count+1}: {desc[:120]}", flush=True)
+        desc = str(info.get("action_description", action))
+        _log_fn(f"Action: {desc}", "info", "▶️")
+        print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI Step {step_count+1}: {desc}", flush=True)
 
         if action == "DONE":
             last_result = f"GUI Task Completed: {desc}"
@@ -485,9 +486,9 @@ def mcp_worker_node(state: CortexState) -> dict:
     if _is_stopped():
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
-    instruction = state.get("_instruction", "")
-    _log_fn(f"MCP: {instruction[:100]}…", "step", "🔧")
-    print(f"[{time.strftime('%H:%M:%S')}] 🔧 MCP: {instruction[:100]}", flush=True)
+    instruction = str(state.get("_instruction", ""))
+    _log_fn(f"MCP: {instruction}", "step", "🔧")
+    print(f"[{time.strftime('%H:%M:%S')}] 🔧 MCP: {instruction}", flush=True)
 
     try:
         result_text = _run_in_bg_loop(_mcp_worker_async(instruction))
@@ -495,8 +496,8 @@ def mcp_worker_node(state: CortexState) -> dict:
         result_text = f"MCP error: {e}"
         logger.error("MCP error: %s", e)
 
-    _log_fn(f"MCP result: {result_text[:150]}…", "info", "🔧")
-    print(f"[{time.strftime('%H:%M:%S')}] 🔧 Result: {result_text[:200]}", flush=True)
+    _log_fn(f"MCP result: {result_text}", "info", "🔧")
+    print(f"[{time.strftime('%H:%M:%S')}] 🔧 Result: {result_text}", flush=True)
 
     new_msg = {"role": "user", "content": f"[MCP Worker] {result_text}"}
     return {
@@ -569,9 +570,9 @@ def code_worker_node(state: CortexState) -> dict:
     if _is_stopped():
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
-    instruction = state.get("_instruction", "")
-    _log_fn(f"Code Agent: {instruction[:100]}…", "step", "💻")
-    print(f"[{time.strftime('%H:%M:%S')}] 💻 Code Agent: {instruction[:100]}", flush=True)
+    instruction = str(state.get("_instruction", ""))
+    _log_fn(f"Code Agent: {instruction}", "step", "💻")
+    print(f"[{time.strftime('%H:%M:%S')}] 💻 Code Agent: {instruction}", flush=True)
 
     agent = _get_code_agent()
     screenshot_bytes = state.get("screenshot") or _capture_screenshot_bytes()
@@ -606,8 +607,8 @@ def code_worker_node(state: CortexState) -> dict:
         result_text = f"Code Agent error: {e}"
         logger.error("Code Agent error: %s", e)
 
-    _log_fn(f"Code done: {result_text[:150]}…", "info", "💻")
-    print(f"[{time.strftime('%H:%M:%S')}] 💻 Done: {result_text[:300]}", flush=True)
+    _log_fn(f"Code done: {result_text}", "info", "💻")
+    print(f"[{time.strftime('%H:%M:%S')}] 💻 Done: {result_text}", flush=True)
 
     new_msg = {"role": "user", "content": f"[Code Worker] {result_text}"}
     return {
@@ -712,7 +713,7 @@ class Cortex:
             _log_fn("MCP tools loaded.", "success", "🔧")
             print(f"[{time.strftime('%H:%M:%S')}] ✅ MCP:\n{self._mcp_tool_desc}", flush=True)
         except Exception as e:
-            logger.warning("MCP init failed: %s", (str(e)[:200] + "...") if len(str(e)) > 200 else str(e))
+            logger.warning("MCP init failed: %s", e)
             self._mcp_tool_desc = "MCP tools unavailable."
 
     @observe(name="cortex_run")
