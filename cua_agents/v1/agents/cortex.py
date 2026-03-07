@@ -28,8 +28,10 @@ import pyautogui
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import ToolMessage
 from langgraph.graph import END, StateGraph
 from langfuse import observe, get_client
+from langfuse.langchain import CallbackHandler
 
 from cua_agents.v1.agents.code_agent import CodeAgent
 from cua_agents.v1.agents.evocua_agent import EvoCUAAgent
@@ -400,6 +402,7 @@ _GEMINI_VALID_TYPES = {"string", "integer", "number", "boolean", "array", "objec
 
 def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
     """Recursively sanitize JSON schema for Gemini's strict function-calling requirements."""
+    import copy
     if root_schema is None:
         root_schema = schema
 
@@ -408,7 +411,7 @@ def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
             return [_sanitize_schema(item, root_schema) for item in schema]
         return schema
 
-    s = dict(schema)
+    s = copy.deepcopy(schema)
 
     # Resolve $ref inline
     if "$ref" in s:
@@ -417,7 +420,7 @@ def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
             parts = ref_path.split("/")[1:]
             resolved = root_schema
             for p in parts:
-                if p in resolved:
+                if isinstance(resolved, dict) and p in resolved:
                     resolved = resolved[p]
                 else:
                     break
@@ -449,18 +452,41 @@ def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
         s["type"] = types[0] if types else "string"
 
     # Ensure type is a valid Gemini string
-    if "type" in s and s["type"] not in _GEMINI_VALID_TYPES:
-        del s["type"]
+    if "type" in s:
+        st = s["type"]
+        if not isinstance(st, str) or st not in _GEMINI_VALID_TYPES:
+            del s["type"]
 
     # Infer object type from properties
     if "properties" in s and "type" not in s:
         s["type"] = "object"
 
-    # Normalize property values that are plain strings instead of schema dicts
+    # Convert open-ended object types (type=object with no inner properties)
+    # to type=string.  This prevents Pydantic crashes in langchain-google-genai
+    # when a tool parameter is literally named "properties" — the Gemini SDK's
+    # Schema model confuses user parameter names with JSON Schema keywords.
+    if s.get("type") == "object" and "properties" not in s:
+        desc = s.get("description", "")
+        s["type"] = "string"
+        s["description"] = f"{desc} (JSON string)".strip()
+
+    # Recurse into properties values (each value is a sub-schema)
     if "properties" in s and isinstance(s["properties"], dict):
-        for pk, pv in list(s["properties"].items()):
+        new_props = {}
+        for pk, pv in s["properties"].items():
             if isinstance(pv, str):
-                s["properties"][pk] = {"type": pv} if pv in _GEMINI_VALID_TYPES else {"type": "string"}
+                new_props[pk] = {"type": pv} if pv in _GEMINI_VALID_TYPES else {"type": "string"}
+            elif isinstance(pv, dict):
+                new_props[pk] = _sanitize_schema(pv, root_schema)
+            else:
+                new_props[pk] = {"type": "string"}
+        s["properties"] = new_props
+
+    # Recurse into items (array item schema)
+    if "items" in s and isinstance(s["items"], dict):
+        s["items"] = _sanitize_schema(s["items"], root_schema)
+    elif "items" in s and isinstance(s["items"], list):
+        s["items"] = [_sanitize_schema(item, root_schema) for item in s["items"]]
 
     # Empty schema → default to string
     if not s:
@@ -469,13 +495,9 @@ def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
     # Strip required entries whose properties don't exist
     if "required" in s and isinstance(s["required"], list):
         props = set(s.get("properties", {}).keys())
-        s["required"] = [r for r in s["required"] if r in props]
+        s["required"] = [r for r in s["required"] if isinstance(r, str) and r in props]
         if not s["required"]:
             del s["required"]
-
-    # Recurse into remaining values
-    for k, v in list(s.items()):
-        s[k] = _sanitize_schema(v, root_schema)
 
     return s
 
@@ -532,8 +554,10 @@ def mcp_worker_node(state: CortexState) -> dict:
     _log_fn(f"MCP: {instruction}", "step", "🔧")
     print(f"[{time.strftime('%H:%M:%S')}] 🔧 MCP: {instruction}", flush=True)
 
+    langfuse_handler = CallbackHandler()
+
     try:
-        result_text = _run_in_bg_loop(_mcp_worker_async(instruction))
+        result_text = _run_in_bg_loop(_mcp_worker_async(instruction, callbacks=[langfuse_handler]))
     except Exception as e:
         result_text = f"MCP error: {e}"
         logger.error("MCP error: %s", e)
@@ -548,39 +572,72 @@ def mcp_worker_node(state: CortexState) -> dict:
         "next_node": "orchestrator",
     }
 
-
-async def _mcp_worker_async(instruction: str) -> str:
-    """LLM picks a tool → ToolManager executes it."""
+async def _mcp_worker_async(instruction: str, callbacks: list = None) -> str:
+    """LLM picks tools → ToolManager executes them in a JIT loop."""
     tm = await _ensure_tool_manager()
     openai_tools = _mcp_tools_to_openai_functions(tm)
     if not openai_tools:
         return "No MCP tools available."
 
     llm_with_tools = _llm.bind(tools=openai_tools)
-    response = llm_with_tools.invoke([
+    config = {"callbacks": callbacks} if callbacks else {}
+    messages = [
         {"role": "system", "content": MCP_WORKER_SYSTEM_PROMPT},
         {"role": "user", "content": instruction},
-    ])
+    ]
 
-    if hasattr(response, "tool_calls") and response.tool_calls:
-        results = []
+    for step in range(15):  # Safety limit for JIT loop
+        print(f"JIT Loop Step {step}: Invoking LLM with {len(messages)} messages...", flush=True)
+        response = llm_with_tools.invoke(messages, config=config)
+        print(f"JIT Loop Step {step}: LLM returned.", flush=True)
+        messages.append(response)
+
+        if not hasattr(response, "tool_calls") or not response.tool_calls:
+            print(f"JIT Loop Step {step}: No tool calls, finishing.", flush=True)
+            # The LLM decided it has finished its task and responded with text
+            if isinstance(response.content, list):
+                text_parts = []
+                for part in response.content:
+                    if isinstance(part, dict) and "text" in part:
+                        text_parts.append(part["text"])
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                return "\n".join(text_parts).strip()
+            return str(response.content)
+
+        # Execute tools
+        print(f"JIT Loop Step {step}: Executing {len(response.tool_calls)} tools...", flush=True)
         for tc in response.tool_calls:
             func_name = tc["name"]
             func_args = tc["args"]
+            tool_call_id = tc["id"]
+            
             if "__" in func_name:
                 server, tool_name = func_name.split("__", 1)
             else:
-                results.append(f"Invalid tool format: {func_name}")
+                messages.append(ToolMessage(
+                    tool_call_id=tool_call_id,
+                    name=func_name,
+                    content="Error: Invalid tool format. Expected server__tool_name."
+                ))
                 continue
+                
             logger.info("🔧 Calling %s.%s(%s)", server, tool_name, json.dumps(func_args, default=str)[:200])
             try:
                 result = await tm.call_tool(server, tool_name, func_args)
-                results.append(f"{server}.{tool_name}: {str(result)[:2000]}")
+                result_str = str(result)
             except Exception as e:
-                results.append(f"{server}.{tool_name} FAILED: {e}")
-        return "\n".join(results)
-    else:
-        return f"LLM text (no tool call): {response.content[:1000]}"
+                logger.error("🔧 Tool Failed: %s", e)
+                result_str = f"Error executing tool: {e}"
+                
+            messages.append(ToolMessage(
+                tool_call_id=tool_call_id,
+                name=func_name,
+                content=result_str
+            ))
+        print(f"JIT Loop Step {step}: Finished executing tools, looping...", flush=True)
+
+    return "MCP Worker JIT Loop hit maximum steps without finishing."
 
 
 # ── Code Worker Node (CodeAgent wrapper) ─────────────────────────────────────

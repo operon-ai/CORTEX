@@ -18,6 +18,7 @@ dependencies = [
     "openai", # OpenAI, Azure OpenAI, and vLLM all use openai SDK
     "langfuse", # LLM observability & tracing
     "langgraph>=0.4.0", # Graph-based agent orchestration
+    "langchain>=0.3.0", # Required for langfuse callbacks
     "langchain-openai>=0.3.0", # LangChain Azure/OpenAI bindings
     "pyautogui", # Screen interaction
     "pillow", # Image processing (PIL)
