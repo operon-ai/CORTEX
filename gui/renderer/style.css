@@ -130,7 +130,7 @@ html, body {
   color: #ffffff;
   font-size: 13px;
   line-height: 1;
-  cursor: pointer;
+  vs-code: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -174,7 +174,7 @@ html, body {
   border: none;
   border-radius: 10px;
   font-size: 11px;
-  cursor: pointer;
+  vs-code: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -189,7 +189,7 @@ html, body {
 }
 .btn-send:hover { background: rgba(167, 139, 250, 0.50); }
 .btn-send:active { transform: scale(0.94); }
-.btn-send:disabled { opacity: 0.2; cursor: not-allowed; }
+.btn-send:disabled { opacity: 0.2; vs-code: not-allowed; }
 
 .btn-stop {
   background: rgba(252, 165, 165, 0.15);
@@ -197,14 +197,14 @@ html, body {
   border: 1px solid rgba(252, 165, 165, 0.18);
 }
 .btn-stop:hover:not(:disabled) { background: rgba(252, 165, 165, 0.28); }
-.btn-stop:disabled { opacity: 0.2; cursor: not-allowed; }
+.btn-stop:disabled { opacity: 0.2; vs-code: not-allowed; }
 
 .btn-mic {
   width: 34px; height: 34px;
   border: none;
   border-radius: 10px;
   font-size: 11px;
-  cursor: pointer;
+  vs-code: pointer;
   display: flex;
   align-items: center;
   justify-content: center;

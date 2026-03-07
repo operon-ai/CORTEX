@@ -69,6 +69,11 @@ class CortexState(TypedDict):
     mcp_tool_descriptions: str
     orchestrator_reasoning: str
     _instruction: str
+    # For VSCode AI coding tasks: the orchestrator crafts the AI prompt separately
+    # from the GUI navigation instruction. gui_worker will type this into the chatbox.
+    vscode_prompt: str
+    # Slack context extracted from messages (channel, requester) for reporting back
+    slack_reply_context: str
 
 
 # ── Module-level references (set by Cortex.__init__) ─────────────────────────
@@ -216,10 +221,14 @@ def orchestrator_node(state: CortexState) -> dict:
     next_node = decision.get("next_node", "__end__")
     instruction = decision.get("instruction", "")
     reasoning = decision.get("reasoning", "")
+    vscode_prompt = decision.get("vscode_prompt", "")
+    slack_reply_context = decision.get("slack_reply_context", state.get("slack_reply_context", ""))
 
     str_instruction = str(instruction)
     _log_fn(f"→ {next_node}: {str_instruction}", "step", "🧠")
     print(f"[{time.strftime('%H:%M:%S')}] 🧠 → {next_node}: {str_instruction}", flush=True)
+    if vscode_prompt:
+        print(f"[{time.strftime('%H:%M:%S')}] 🧠 vscode_prompt crafted ({len(vscode_prompt)} chars)", flush=True)
 
     langfuse = get_client()
     # Encode for logging purposes
@@ -238,6 +247,8 @@ def orchestrator_node(state: CortexState) -> dict:
         "step": step + 1,
         "messages": state["messages"] + [new_msg],
         "_instruction": instruction,
+        "vscode_prompt": vscode_prompt,
+        "slack_reply_context": slack_reply_context,
     }
 
 
@@ -261,22 +272,49 @@ def _get_evocua_agent() -> EvoCUAAgent:
     return _evocua_agent
 
 
+def _is_vscode_chatbox_task(instruction: str) -> bool:
+    """Detect if the GUI instruction is to navigate to a VSCode AI chatbox."""
+    keywords = ["vscode", "vs code", "copilot chat", "ai chat", "chatbox", "chat panel",
+                 "chat input", "open chat", "agent chat", "chat box"]
+    lower = instruction.lower()
+    return any(kw in lower for kw in keywords)
+
+
 @observe(name="gui_worker_node")
 def gui_worker_node(state: CortexState) -> dict:
     if _is_stopped():
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
     instruction = str(state.get("_instruction", state.get("task", "")))
+    vscode_prompt = state.get("vscode_prompt", "")
     _log_fn(f"GUI Task: {instruction}", "step", "🖱️")
     print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI: {instruction}", flush=True)
 
+    # If this is a VSCode chatbox task and the orchestrator supplied a vscode_prompt,
+    # embed it into the navigation instruction so the GUI agent knows exactly what to type.
+    # The GUI agent's sole job: navigate to the chatbox and submit this prompt.
+    if vscode_prompt and _is_vscode_chatbox_task(instruction):
+        _log_fn("VSCode chatbox task detected — injecting orchestrator prompt.", "info", "💬")
+        print(f"[{time.strftime('%H:%M:%S')}] 💬 Injecting vscode_prompt into GUI instruction", flush=True)
+        instruction = (
+            f"{instruction}\n\n"
+            f"IMPORTANT: Once the AI chat input box is focused and ready, type the following "
+            f"prompt EXACTLY as written (do not paraphrase or abbreviate), then press Enter to submit:\n\n"
+            f"--- BEGIN PROMPT ---\n"
+            f"{vscode_prompt}\n"
+            f"--- END PROMPT ---\n\n"
+            f"After submitting, wait for the AI to finish responding (watch for the response to stop "
+            f"streaming), then take a final screenshot capturing the full response."
+        )
+
     agent = _get_evocua_agent()
-    agent.reset() # Start fresh history for this delegation
+    agent.reset()  # Start fresh history for this delegation
 
     step_count = 0
-    max_sub_steps = 30 # Internal budget to prevent infinite loops
+    max_sub_steps = 30  # Internal budget to prevent infinite loops
     last_result = "Delegated to GUI worker."
     current_messages = list(state["messages"])
+    original_instruction = str(state.get("_instruction", ""))
 
     while step_count < max_sub_steps:
         if _is_stopped():
@@ -285,16 +323,21 @@ def gui_worker_node(state: CortexState) -> dict:
 
         _log_fn(f"GUI ({step_count+1}/{max_sub_steps}): Thinking…", "step", "🧠")
         screenshot_bytes = _capture_screenshot_bytes()
-        
+
         info, codes = agent.predict(instruction=instruction, observation={"screenshot": screenshot_bytes})
         action = codes[0] if codes else "WAIT"
-        
+
         desc = str(info.get("action_description", action))
         _log_fn(f"Action: {desc}", "info", "▶️")
         print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI Step {step_count+1}: {desc}", flush=True)
 
         if action == "DONE":
+            # Capture a final screenshot to report back (useful for Slack reporting)
+            final_screenshot_bytes = _capture_screenshot_bytes()
+            final_screenshot_b64 = base64.b64encode(final_screenshot_bytes).decode("utf-8")
             last_result = f"GUI Task Completed: {desc}"
+            if vscode_prompt and _is_vscode_chatbox_task(original_instruction):
+                last_result += f"\n[SCREENSHOT_B64:{final_screenshot_b64}]"
             _log_fn("GUI: Done.", "success", "🏁")
             break
         if action == "FAIL":
@@ -315,7 +358,7 @@ def gui_worker_node(state: CortexState) -> dict:
             result_text = f"GUI Execution error: {e}"
             logger.error("GUI exec error: %s", e)
             last_result = result_text
-            break # Exit loop on hard crash
+            break  # Exit loop on hard crash
 
         last_result = result_text
         step_count += 1
@@ -323,7 +366,13 @@ def gui_worker_node(state: CortexState) -> dict:
     if step_count >= max_sub_steps:
         _log_fn("Budget hit. Summarizing progress…", "info", "📝")
         summary = agent.summarize_progress(instruction)
-        last_result = f"GUI budget reached. Status: {summary}"
+        # Capture screenshot even on budget exhaustion for VSCode tasks
+        if vscode_prompt and _is_vscode_chatbox_task(original_instruction):
+            final_screenshot_bytes = _capture_screenshot_bytes()
+            final_screenshot_b64 = base64.b64encode(final_screenshot_bytes).decode("utf-8")
+            last_result = f"GUI budget reached. Status: {summary}\n[SCREENSHOT_B64:{final_screenshot_b64}]"
+        else:
+            last_result = f"GUI budget reached. Status: {summary}"
         _log_fn("GUI: Detailed status reported.", "warning", "⏰")
 
     new_msg = {"role": "user", "content": f"[GUI Worker] {last_result}"}
@@ -331,6 +380,8 @@ def gui_worker_node(state: CortexState) -> dict:
         "last_worker_result": last_result,
         "messages": current_messages + [new_msg],
         "next_node": "orchestrator",
+        # Clear vscode_prompt after use so it isn't re-injected on the next GUI call
+        "vscode_prompt": "",
     }
 
 
@@ -778,7 +829,7 @@ class Cortex:
 
         # Single shared LLM
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-pro",
             api_key=os.getenv("GEMINI_API_KEY"),
             temperature=1,
             max_tokens=4096,
@@ -833,6 +884,8 @@ class Cortex:
             "mcp_tool_descriptions": self._mcp_tool_desc,
             "orchestrator_reasoning": "",
             "_instruction": "",
+            "vscode_prompt": "",
+            "slack_reply_context": "",
         }
 
         final_state = self.graph.invoke(initial_state)
