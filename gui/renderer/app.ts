@@ -15,7 +15,16 @@ interface StatusMessage {
   status: 'idle' | 'running' | 'done' | 'error';
 }
 
-type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' } | { type: 'transcript'; text: string };
+interface ParsedStep {
+  icon: string;
+  agent: 'brain' | 'gui' | 'mcp' | 'infra' | 'code' | 'system';
+  title: string;
+  detail: string;
+  level: string;
+  timestamp: string;
+}
+
+type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' } | { type: 'transcript'; text: string } | { type: 'todo_update'; items: Array<{ id: number, text: string, status: 'pending' | 'in_progress' | 'done' | 'failed' }> };
 type ClientMessage = { type: 'start_task'; task: string } | { type: 'stop_task' } | { type: 'ping' } | { type: 'stt_audio'; data: string };
 type ConnState = 'connected' | 'connecting' | 'disconnected';
 
@@ -35,6 +44,7 @@ const WS_URL = 'ws://localhost:7577/ws';
 const RECONNECT_BASE = 1000;
 const RECONNECT_MAX = 10000;
 const PING_INTERVAL = 15000;
+const MAX_HISTORY = 50;
 
 const STATUS_LABELS: Record<string, string> = {
   idle: 'Idle', running: 'Running', done: 'Done', error: 'Error',
@@ -44,11 +54,20 @@ const CONN_LABELS: Record<ConnState, string> = {
   connected: 'Online', connecting: '...', disconnected: 'Offline',
 };
 
+const AGENT_LABELS: Record<ParsedStep['agent'], string> = {
+  brain: 'Orchestrator', gui: 'GUI', mcp: 'MCP', infra: 'Infra', code: 'Code', system: 'System',
+};
+
 // ── DOM ──────────────────────────────────────────────────────────────────
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const panel = $<HTMLDivElement>('panel');
+const island = $<HTMLDivElement>('island');
+const pillIcon = $<HTMLSpanElement>('pillIcon');
+const pillDot = $<HTMLSpanElement>('pillDot');
+const pillLabel = $<HTMLSpanElement>('pillLabel');
+const pillSteps = $<HTMLSpanElement>('pillSteps');
+const feed = $<HTMLDivElement>('feed');
 const taskInput = $<HTMLInputElement>('taskInput');
 const btnRun = $<HTMLButtonElement>('btnRun');
 const btnStop = $<HTMLButtonElement>('btnStop');
@@ -60,8 +79,8 @@ const statusText = $<HTMLSpanElement>('statusText');
 const connDot = $<HTMLElement>('connIndicator');
 const connLabel = $<HTMLSpanElement>('connLabel');
 const progressTrack = $<HTMLDivElement>('progressTrack');
-const feed = $<HTMLDivElement>('feed');
 const stepCountEl = $<HTMLSpanElement>('stepCount');
+const todoListEl = $<HTMLDivElement>('todoList');
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -71,8 +90,131 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let stepCount = 0;
 let currentStatus = 'idle';
+const stepHistory: ParsedStep[] = [];
 
-// ── Speech Recognition (Gemini Audio API via Python Backend) ─────────────
+// ── Message Parsing ──────────────────────────────────────────────────────
+
+function mapNodeToAgent(node: string): ParsedStep['agent'] {
+  if (node.includes('gui')) return 'gui';
+  if (node.includes('mcp')) return 'mcp';
+  if (node.includes('infra')) return 'infra';
+  if (node.includes('code')) return 'code';
+  return 'brain';
+}
+
+function prettifyAction(action: string): string {
+  const a = action.toLowerCase().trim();
+  if (a.startsWith('click')) return 'Clicking on screen element';
+  if (a.startsWith('type')) return 'Typing text input';
+  if (a.startsWith('scroll')) return 'Scrolling the view';
+  if (a.startsWith('key')) return 'Pressing keyboard shortcut';
+  if (a.startsWith('drag')) return 'Dragging element';
+  if (a.startsWith('hover')) return 'Hovering over element';
+  if (a.startsWith('wait')) return 'Waiting for page to load';
+  if (a.startsWith('screenshot')) return 'Capturing screenshot';
+  return action.charAt(0).toUpperCase() + action.slice(1);
+}
+
+function parseLogMessage(log: LogMessage): ParsedStep {
+  const msg = log.message;
+  let agent: ParsedStep['agent'] = 'system';
+  let title = msg;
+  let detail = '';
+
+  if (/^Step \d+: Thinking/i.test(msg)) {
+    agent = 'brain';
+    const n = msg.match(/Step (\d+)/)?.[1] || '?';
+    title = 'Analyzing current state';
+    detail = `Examining the screen and deciding next action (step ${n})`;
+  }
+  else if (/^Capturing screen/i.test(msg)) {
+    agent = 'brain';
+    title = 'Capturing screenshot';
+    detail = 'Taking a snapshot of the current desktop';
+  }
+  else if (/^→\s*(\w+):\s*(.+)/.test(msg)) {
+    const match = msg.match(/^→\s*(\w+):\s*(.+)/);
+    const node = match![1];
+    const instruction = match![2];
+    agent = mapNodeToAgent(node);
+    title = `Delegating to ${AGENT_LABELS[agent]}`;
+    detail = instruction;
+  }
+  else if (/^GUI Task:\s*(.+)/i.test(msg)) {
+    agent = 'gui';
+    title = msg.match(/^GUI Task:\s*(.+)/i)![1];
+    detail = 'GUI agent navigating the screen';
+  }
+  else if (/^GUI Step \d+: Thinking/i.test(msg)) {
+    agent = 'gui';
+    const n = msg.match(/GUI Step (\d+)/)?.[1] || '?';
+    title = `Visual analysis (sub-step ${n})`;
+    detail = 'Examining screen elements for interaction';
+  }
+  else if (/^Action:\s*(.+)/i.test(msg)) {
+    agent = 'gui';
+    const action = msg.match(/^Action:\s*(.+)/i)![1];
+    title = prettifyAction(action);
+    detail = action !== title ? action : '';
+  }
+  else if (/^GUI: Done/i.test(msg)) {
+    agent = 'gui';
+    title = 'Screen interaction completed';
+    detail = 'GUI agent finished successfully';
+  }
+  else if (/^GUI: Failed/i.test(msg)) {
+    agent = 'gui';
+    title = 'Screen interaction failed';
+    detail = 'GUI agent encountered an error';
+  }
+  else if (/^MCP:\s*(.+)/i.test(msg)) {
+    agent = 'mcp';
+    title = msg.match(/^MCP:\s*(.+)/i)![1];
+    detail = 'Calling external service via MCP';
+  }
+  else if (/^MCP result:\s*(.+)/i.test(msg)) {
+    agent = 'mcp';
+    title = 'Service responded';
+    detail = msg.match(/^MCP result:\s*(.+)/i)![1].substring(0, 150);
+  }
+  else if (/^Code Agent:\s*(.+)/i.test(msg)) {
+    agent = 'code';
+    title = msg.match(/^Code Agent:\s*(.+)/i)![1];
+    detail = 'Executing code operation';
+  }
+  else if (/^Infra:\s*(.+)/i.test(msg)) {
+    agent = 'infra';
+    title = msg.match(/^Infra:\s*(.+)/i)![1];
+    detail = 'Running infrastructure command';
+  }
+  else if (/^Task:\s*(.+)/i.test(msg)) {
+    agent = 'brain';
+    title = 'New task received';
+    detail = msg.match(/^Task:\s*(.+)/i)![1];
+  }
+  else if (/^Finished/i.test(msg)) {
+    agent = 'brain';
+    title = 'All operations completed';
+    detail = msg;
+  }
+  else if (/^Stopped/i.test(msg)) {
+    agent = 'system';
+    title = 'Task stopped by user';
+    detail = '';
+  }
+  else {
+    if (log.icon === '') agent = 'brain';
+    else if (log.icon === '') agent = 'gui';
+    else if (log.icon === '') agent = 'mcp';
+    else if (log.icon === '') agent = 'code';
+    else if (log.icon === '' || log.icon === '') agent = 'infra';
+    title = msg;
+  }
+
+  return { icon: log.icon || '\u00b7', agent, title, detail, level: log.level, timestamp: log.time };
+}
+
+// ── Speech Recognition ───────────────────────────────────────────────────
 
 let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
@@ -86,21 +228,17 @@ async function toggleMic(): Promise<void> {
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // Attempt to use webm or just a generic audio format depending on platform support.
     const opts = MediaRecorder.isTypeSupported('audio/webm') ? { mimeType: 'audio/webm' } : undefined;
     mediaRecorder = new MediaRecorder(stream, opts);
     audioChunks = [];
 
     mediaRecorder.addEventListener('dataavailable', (event) => {
-      if (event.data.size > 0) {
-        audioChunks.push(event.data);
-      }
+      if (event.data.size > 0) audioChunks.push(event.data);
     });
 
     mediaRecorder.addEventListener('stop', () => {
       isRecording = false;
       btnMic.classList.remove('recording');
-
       const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
       const reader = new FileReader();
       reader.readAsDataURL(audioBlob);
@@ -108,8 +246,6 @@ async function toggleMic(): Promise<void> {
         const base64Audio = (reader.result as string).split(',')[1];
         send({ type: 'stt_audio', data: base64Audio });
       };
-
-      // Stop all tracks to release the microphone lock
       stream.getTracks().forEach(track => track.stop());
     });
 
@@ -164,6 +300,37 @@ function handle(msg: ServerMessage): void {
     taskInput.focus();
     startTask();
   }
+  else if (msg.type === 'todo_update') {
+    renderTodoList(msg.items);
+  }
+}
+
+function renderTodoList(items: Array<{ id: number, text: string, status: string }>) {
+  if (!items || items.length === 0) {
+    todoListEl.style.display = 'none';
+    return;
+  }
+  todoListEl.style.display = 'flex';
+  todoListEl.innerHTML = '';
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = `todo-item status-${item.status}`;
+
+    const icon = document.createElement('span');
+    icon.className = 'todo-icon';
+    if (item.status === 'done') icon.innerHTML = '✅';
+    else if (item.status === 'in_progress') icon.innerHTML = '🔄';
+    else if (item.status === 'failed') icon.innerHTML = '❌';
+    else icon.innerHTML = '⬜';
+
+    const text = document.createElement('span');
+    text.className = 'todo-text';
+    text.textContent = item.text;
+
+    div.appendChild(icon);
+    div.appendChild(text);
+    todoListEl.appendChild(div);
+  });
 }
 
 // ── UI ───────────────────────────────────────────────────────────────────
@@ -177,31 +344,61 @@ function setStatus(s: string): void {
   currentStatus = s;
   statusPill.setAttribute('data-status', s);
   statusText.textContent = STATUS_LABELS[s] || s;
+  pillDot.setAttribute('data-status', s);
 
   const running = s === 'running';
   btnRun.disabled = running;
   btnStop.disabled = !running;
   progressTrack.classList.toggle('visible', running);
-  panel.classList.toggle('running', running);
+  island.classList.toggle('running', running);
 
-  if (s === 'done' || s === 'error') { btnRun.disabled = false; btnStop.disabled = true; }
+  if (s === 'done' || s === 'error') {
+    btnRun.disabled = false;
+    btnStop.disabled = true;
+  }
+
+  if (s === 'done') {
+    pillIcon.textContent = '\u2705';
+    pillLabel.textContent = 'Task completed';
+  } else if (s === 'error') {
+    pillIcon.textContent = '\u274c';
+    pillLabel.textContent = 'Task failed';
+  } else if (s === 'idle') {
+    pillIcon.textContent = '\u00b7';
+    pillLabel.textContent = 'Ready';
+  }
 }
 
 function showStep(log: LogMessage): void {
-  const levelClass = log.level === 'error' ? ' error' : log.level === 'success' ? ' success' : '';
+  const parsed = parseLogMessage(log);
+  stepHistory.push(parsed);
+  if (stepHistory.length > MAX_HISTORY) stepHistory.shift();
 
-  feed.innerHTML = `
-    <div class="step-entry">
-      <span class="step-icon">${esc(log.icon || '\u00b7')}</span>
-      <span class="step-msg${levelClass}">${esc(log.message)}</span>
-      <span class="step-time">${esc(log.time)}</span>
-    </div>
-  `;
+  // Update collapsed pill
+  pillIcon.textContent = parsed.icon || '\u00b7';
+  pillLabel.textContent = parsed.title;
 
   if (log.level === 'step' || log.level === 'success') {
     stepCount++;
     stepCountEl.textContent = String(stepCount);
+    pillSteps.textContent = `Step ${stepCount}`;
   }
+
+  // Append card to feed
+  const levelClass = parsed.level === 'error' ? ' error' : parsed.level === 'success' ? ' success' : '';
+  const card = document.createElement('div');
+  card.className = 'step-card';
+  card.innerHTML = `
+    <span class="card-icon">${esc(parsed.icon || '\u00b7')}</span>
+    <div class="card-body">
+      <span class="card-agent" data-agent="${esc(parsed.agent)}">${esc(AGENT_LABELS[parsed.agent])}</span>
+      <span class="card-title${levelClass}">${esc(parsed.title)}</span>
+      ${parsed.detail ? `<span class="card-detail">${esc(parsed.detail)}</span>` : ''}
+    </div>
+    <span class="card-time">${esc(parsed.timestamp)}</span>
+  `;
+  feed.appendChild(card);
+  feed.scrollTop = feed.scrollHeight;
 }
 
 function esc(s: string): string {
@@ -219,11 +416,26 @@ function shake(el: HTMLElement): void {
 function startTask(): void {
   const task = taskInput.value.trim();
   if (!task) { shake(taskInput); taskInput.focus(); return; }
+
+  stepHistory.length = 0;
   feed.innerHTML = '';
   stepCount = 0;
   stepCountEl.textContent = '0';
+  pillSteps.textContent = '';
+  pillIcon.textContent = '\uD83D\uDE80';
+  pillLabel.textContent = 'Starting...';
+
   send({ type: 'start_task', task });
 }
+
+// ── Pin island open while input is focused ───────────────────────────────
+
+taskInput.addEventListener('focus', () => island.classList.add('pinned'));
+taskInput.addEventListener('blur', () => {
+  setTimeout(() => {
+    if (document.activeElement !== taskInput) island.classList.remove('pinned');
+  }, 150);
+});
 
 // ── Events ───────────────────────────────────────────────────────────────
 
@@ -238,5 +450,4 @@ taskInput.addEventListener('keydown', (e: KeyboardEvent) => {
 
 // ── Init ─────────────────────────────────────────────────────────────────
 
-feed.innerHTML = '<span class="step-idle">Ready</span>';
 connect();

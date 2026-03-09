@@ -131,6 +131,9 @@ class LMMAgent:
             images = image_content if isinstance(image_content, list) else [image_content]
             # vLLM uses bare data URI; OpenAI/Azure use image_url with detail
             use_detail = not isinstance(self.engine, LMMEnginevLLM)
+            # vLLM models typically support only 1 image per prompt — keep only the latest
+            if not use_detail and len(images) > 1:
+                images = images[-1:]
             for img in images:
                 b64 = self.encode_image(img)
                 if use_detail:

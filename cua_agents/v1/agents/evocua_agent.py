@@ -399,75 +399,51 @@ Analyze the history above and provide a detailed status for the orchestrator."""
         if self._loop_warning:
             loop_suffix = f"\n\n{self._loop_warning}"
 
-        # Add historical turns (screenshot + response)
+        # Add historical turns as text-only (model supports only 1 image per prompt)
         if history_n > 0:
             hist_responses = self._responses[-history_n:]
-            hist_imgs = self._screenshots[-history_n - 1:-1]
 
             for i in range(history_n):
-                if i < len(hist_imgs):
-                    img_url = f"data:image/png;base64,{hist_imgs[i]}"
-                    if i == 0:
-                        prompt = (
-                            f"\nPlease generate the next move according to the "
-                            f"UI screenshot, instruction and previous actions.\n\n"
-                            f"Instruction: {instruction}\n\n"
-                            f"Previous actions:\n{prev_str}"
-                        )
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": img_url}},
-                                {"type": "text", "text": prompt},
-                            ],
-                        })
-                    else:
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": img_url}},
-                            ],
-                        })
+                if i == 0:
+                    prompt = (
+                        f"\nPlease generate the next move according to the "
+                        f"UI screenshot, instruction and previous actions.\n\n"
+                        f"Instruction: {instruction}\n\n"
+                        f"Previous actions:\n{prev_str}"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": "(screenshot omitted)"}],
+                    })
 
                 messages.append({
                     "role": "assistant",
                     "content": [{"type": "text", "text": hist_responses[i]}],
                 })
 
-        # Current turn — inject loop warning if present
+        # Current turn — only image in the prompt
         img_url = f"data:image/png;base64,{current_img_b64}"
+        prompt_parts = []
         if history_n == 0:
-            prompt = (
+            prompt_parts.append(
                 f"\nPlease generate the next move according to the "
                 f"UI screenshot, instruction and previous actions.\n\n"
                 f"Instruction: {instruction}\n\n"
                 f"Previous actions:\n{prev_str}"
-                f"{loop_suffix}"
             )
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": img_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            })
-        else:
-            if loop_suffix:
-                # Need to add text alongside the image
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": img_url}},
-                        {"type": "text", "text": loop_suffix.strip()},
-                    ],
-                })
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": img_url}},
-                    ],
-                })
+        if loop_suffix:
+            prompt_parts.append(loop_suffix.strip())
+
+        content: list = [{"type": "image_url", "image_url": {"url": img_url}}]
+        if prompt_parts:
+            content.append({"type": "text", "text": "\n\n".join(prompt_parts)})
+
+        messages.append({"role": "user", "content": content})
 
         return messages
 

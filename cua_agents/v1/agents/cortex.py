@@ -35,9 +35,11 @@ from langfuse.langchain import CallbackHandler
 
 from cua_agents.v1.agents.code_agent import CodeAgent
 from cua_agents.v1.agents.evocua_agent import EvoCUAAgent
+from cua_agents.v1.agents.infra_agent import INFRA_TOOLS, handle_infra_tool
 from cua_agents.v1.agents.prompts import (
     ORCHESTRATOR_SYSTEM_PROMPT,
     MCP_WORKER_SYSTEM_PROMPT,
+    INFRA_WORKER_SYSTEM_PROMPT,
 )
 from cua_agents.v1.tools.tool_manager import ToolManager
 from cua_agents.v1.utils.local_env import LocalController
@@ -45,7 +47,7 @@ from cua_agents.v1.utils.local_env import LocalController
 load_dotenv()
 
 # Central Workspace for all file operations
-CORTEX_WORKSPACE = os.path.join(os.path.expanduser("~"), "Desktop", "cortex_workspace")
+CORTEX_WORKSPACE = os.path.join(os.path.expanduser("~"), "Desktop")
 if not os.path.exists(CORTEX_WORKSPACE):
     os.makedirs(CORTEX_WORKSPACE, exist_ok=True)
 
@@ -74,6 +76,9 @@ class CortexState(TypedDict):
     vscode_prompt: str
     # Slack context extracted from messages (channel, requester) for reporting back
     slack_reply_context: str
+    # Todo tracker — live checklist of sub-steps
+    todo_list: List[Dict[str, Any]]  # [{"id": 0, "text": "...", "status": "pending"|"in_progress"|"done"|"failed"}]
+    current_todo_index: int
 
 
 # ── Module-level references (set by Cortex.__init__) ─────────────────────────
@@ -113,6 +118,7 @@ _hide_ui_fn: Callable[[], None] = lambda: None
 _show_ui_fn: Callable[[], None] = lambda: None
 _stop_flag: Optional[threading.Event] = None
 _log_fn: Callable[..., None] = lambda msg, *a, **kw: None
+_todo_fn: Callable[..., None] = lambda items: None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -154,14 +160,24 @@ def _build_orchestrator_messages(state: CortexState) -> list:
         workspace=CORTEX_WORKSPACE
     )
     messages = [{"role": "system", "content": system_msg}]
-    messages.append({
-        "role": "user",
-        "content": f"Task: {state['task']}\n\nStep: {state['step']}/{state['max_steps']}"
-    })
+
+    # Build context block with task + step + todo state
+    context_parts = [f"Task: {state['task']}", f"Step: {state['step']}/{state['max_steps']}"]
+    todo_list = state.get("todo_list", [])
+    if todo_list:
+        todo_text = "\n\nCurrent TODO checklist:"
+        for item in todo_list:
+            icon = {"done": "✅", "in_progress": "🔄", "failed": "❌"}.get(item["status"], "⬜")
+            todo_text += f"\n  {icon} {item['id']+1}. {item['text']} [{item['status']}]"
+        context_parts.append(todo_text)
+    else:
+        context_parts.append("\n\nThis is your FIRST step. You MUST include a \"todo_list\" in your response — decompose the user's task into 3-7 concrete sub-steps.")
+
+    messages.append({"role": "user", "content": "\n".join(context_parts)})
+
     for msg in state["messages"][-10:]:
         messages.append(msg)
     if state.get("screenshot"):
-        # Encode bytes to B64 only at the point of message construction
         b64_img = base64.b64encode(state["screenshot"]).decode("utf-8")
         messages.append({
             "role": "user",
@@ -173,7 +189,7 @@ def _build_orchestrator_messages(state: CortexState) -> list:
     if state.get("last_worker_result"):
         messages.append({
             "role": "user",
-            "content": f"Last worker result:\n{state['last_worker_result']}"
+            "content": f"Last worker result:\n{state['last_worker_result']}\n\nEvaluate: did the previous step succeed? Set todo_evaluation to 'pass', 'fail', or 'skip'."
         })
     return messages
 
@@ -183,18 +199,18 @@ def orchestrator_node(state: CortexState) -> dict:
     """The brain — decides what worker to call next."""
     step = state["step"]
     max_s = state["max_steps"]
-    logger.info("🧠 Orchestrator (step %d/%d)", step, max_s)
-    _log_fn(f"Step {step + 1}/{max_s}: Thinking…", "step", "🧠")
+    logger.info(" Orchestrator (step %d/%d)", step, max_s)
+    _log_fn(f"Step {step + 1}/{max_s}: Thinking…", "step", "")
 
     if _is_stopped():
-        _log_fn("Stopped by user.", "warning", "⏹️")
+        _log_fn("Stopped by user.", "warning", "")
         return {"next_node": "__end__", "orchestrator_reasoning": "Stopped by user.", "step": step + 1}
 
     if step >= max_s:
-        _log_fn("Step budget exhausted.", "warning", "⏰")
+        _log_fn("Step budget exhausted.", "warning", "")
         return {"next_node": "__end__", "orchestrator_reasoning": "Budget exhausted.", "step": step + 1}
 
-    _log_fn("Capturing screen…", "step", "📷")
+    _log_fn("Capturing screen…", "step", "")
     screenshot_bytes = _capture_screenshot_bytes()
 
     updated_state = {**state, "screenshot": screenshot_bytes}
@@ -203,7 +219,7 @@ def orchestrator_node(state: CortexState) -> dict:
     try:
         response = _llm.invoke(messages)
         raw_text = response.content
-        print(f"[{time.strftime('%H:%M:%S')}] 🧠 raw: {raw_text}", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}]  raw: {raw_text}", flush=True)
 
         cleaned = raw_text.strip()
         if cleaned.startswith("```"):
@@ -224,14 +240,79 @@ def orchestrator_node(state: CortexState) -> dict:
     vscode_prompt = decision.get("vscode_prompt", "")
     slack_reply_context = decision.get("slack_reply_context", state.get("slack_reply_context", ""))
 
+    # ── Todo list management ──────────────────────────────────────────────
+    todo_list = list(state.get("todo_list", []))
+    current_idx = state.get("current_todo_index", 0)
+
+    # First step or whenever LLM returns a full todo list structure
+    if "todo_list" in decision:
+        raw_todos = decision["todo_list"]
+        
+        # If this is the initial creation and we just have strings, convert to dicts
+        # BUT if LLM provides full structured dicts with subtasks, preserve them.
+        new_list = []
+        for i, t in enumerate(raw_todos):
+            if isinstance(t, dict):
+                item = {
+                    "id": t.get("id", i), 
+                    "text": str(t.get("text", "")), 
+                    "status": t.get("status", "pending")
+                }
+                if "subtasks" in t:
+                    item["subtasks"] = t["subtasks"]
+                new_list.append(item)
+            else:
+                new_list.append({"id": i, "text": str(t), "status": "pending"})
+                
+        if step == 0 and new_list:
+            new_list[0]["status"] = "in_progress"
+            
+        todo_list = new_list
+        current_idx = decision.get("current_todo_index", 0)
+        
+        if step == 0:
+            _log_fn(f" Plan: {len(todo_list)} steps", "info", "")
+            
+        # Send flattened/top-level only to UI so JS doesn't break
+        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+
+    # Subsequent steps: evaluate previous step and advance IF todo_list wasn't just completely rewritten
+    elif todo_list and step > 0:
+        evaluation = decision.get("todo_evaluation", "pass")
+        if current_idx < len(todo_list):
+            if evaluation == "fail":
+                todo_list[current_idx]["status"] = "failed"
+                _log_fn(f"❌ Step {current_idx+1} failed: {todo_list[current_idx]['text']}", "warning", "")
+            else:  # pass or skip
+                todo_list[current_idx]["status"] = "done"
+                _log_fn(f"✅ Step {current_idx+1} done: {todo_list[current_idx]['text']}", "success", "")
+
+        # Advance to next pending todo
+        new_idx = decision.get("current_todo_index", current_idx + 1)
+        if isinstance(new_idx, int) and 0 <= new_idx < len(todo_list):
+            current_idx = new_idx
+        else:
+            current_idx = min(current_idx + 1, len(todo_list) - 1)
+
+        if current_idx < len(todo_list) and todo_list[current_idx]["status"] == "pending":
+            todo_list[current_idx]["status"] = "in_progress"
+
+        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+
+    # If ending, mark all top-level remaining as done (if no failures)
+    if next_node == "__end__" and todo_list:
+        for item in todo_list:
+            if item["status"] in ("pending", "in_progress"):
+                item["status"] = "done"
+        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+
     str_instruction = str(instruction)
-    _log_fn(f"→ {next_node}: {str_instruction}", "step", "🧠")
-    print(f"[{time.strftime('%H:%M:%S')}] 🧠 → {next_node}: {str_instruction}", flush=True)
+    _log_fn(f"→ {next_node}: {str_instruction}", "step", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  → {next_node}: {str_instruction}", flush=True)
     if vscode_prompt:
-        print(f"[{time.strftime('%H:%M:%S')}] 🧠 vscode_prompt crafted ({len(vscode_prompt)} chars)", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}]  vscode_prompt crafted ({len(vscode_prompt)} chars)", flush=True)
 
     langfuse = get_client()
-    # Encode for logging purposes
     log_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
     langfuse.update_current_span(
         metadata={"step": step, "next_node": next_node},
@@ -249,6 +330,8 @@ def orchestrator_node(state: CortexState) -> dict:
         "_instruction": instruction,
         "vscode_prompt": vscode_prompt,
         "slack_reply_context": slack_reply_context,
+        "todo_list": todo_list,
+        "current_todo_index": current_idx,
     }
 
 
@@ -287,15 +370,15 @@ def gui_worker_node(state: CortexState) -> dict:
 
     instruction = str(state.get("_instruction", state.get("task", "")))
     vscode_prompt = state.get("vscode_prompt", "")
-    _log_fn(f"GUI Task: {instruction}", "step", "🖱️")
-    print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI: {instruction}", flush=True)
+    _log_fn(f"GUI Task: {instruction}", "step", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  GUI: {instruction}", flush=True)
 
     # If this is a VSCode chatbox task and the orchestrator supplied a vscode_prompt,
     # embed it into the navigation instruction so the GUI agent knows exactly what to type.
     # The GUI agent's sole job: navigate to the chatbox and submit this prompt.
     if vscode_prompt and _is_vscode_chatbox_task(instruction):
-        _log_fn("VSCode chatbox task detected — injecting orchestrator prompt.", "info", "💬")
-        print(f"[{time.strftime('%H:%M:%S')}] 💬 Injecting vscode_prompt into GUI instruction", flush=True)
+        _log_fn("VSCode chatbox task detected — injecting orchestrator prompt.", "info", "")
+        print(f"[{time.strftime('%H:%M:%S')}]  Injecting vscode_prompt into GUI instruction", flush=True)
         instruction = (
             f"{instruction}\n\n"
             f"IMPORTANT: Once the AI chat input box is focused and ready, type the following "
@@ -321,15 +404,15 @@ def gui_worker_node(state: CortexState) -> dict:
             last_result = "Stopped by user."
             break
 
-        _log_fn(f"GUI ({step_count+1}/{max_sub_steps}): Thinking…", "step", "🧠")
+        _log_fn(f"GUI ({step_count+1}/{max_sub_steps}): Thinking…", "step", "")
         screenshot_bytes = _capture_screenshot_bytes()
 
         info, codes = agent.predict(instruction=instruction, observation={"screenshot": screenshot_bytes})
         action = codes[0] if codes else "WAIT"
 
         desc = str(info.get("action_description", action))
-        _log_fn(f"Action: {desc}", "info", "▶️")
-        print(f"[{time.strftime('%H:%M:%S')}] 🖱️ GUI Step {step_count+1}: {desc}", flush=True)
+        _log_fn(f"Action: {desc}", "info", "")
+        print(f"[{time.strftime('%H:%M:%S')}]  GUI Step {step_count+1}: {desc}", flush=True)
 
         if action == "DONE":
             # Capture a final screenshot to report back (useful for Slack reporting)
@@ -338,11 +421,11 @@ def gui_worker_node(state: CortexState) -> dict:
             last_result = f"GUI Task Completed: {desc}"
             if vscode_prompt and _is_vscode_chatbox_task(original_instruction):
                 last_result += f"\n[SCREENSHOT_B64:{final_screenshot_b64}]"
-            _log_fn("GUI: Done.", "success", "🏁")
+            _log_fn("GUI: Done.", "success", "")
             break
         if action == "FAIL":
             last_result = f"GUI Task Failed: {desc}"
-            _log_fn("GUI: Failed.", "error", "❌")
+            _log_fn("GUI: Failed.", "error", "")
             break
 
         # Execute
@@ -364,7 +447,7 @@ def gui_worker_node(state: CortexState) -> dict:
         step_count += 1
 
     if step_count >= max_sub_steps:
-        _log_fn("Budget hit. Summarizing progress…", "info", "📝")
+        _log_fn("Budget hit. Summarizing progress…", "info", "")
         summary = agent.summarize_progress(instruction)
         # Capture screenshot even on budget exhaustion for VSCode tasks
         if vscode_prompt and _is_vscode_chatbox_task(original_instruction):
@@ -373,7 +456,7 @@ def gui_worker_node(state: CortexState) -> dict:
             last_result = f"GUI budget reached. Status: {summary}\n[SCREENSHOT_B64:{final_screenshot_b64}]"
         else:
             last_result = f"GUI budget reached. Status: {summary}"
-        _log_fn("GUI: Detailed status reported.", "warning", "⏰")
+        _log_fn("GUI: Detailed status reported.", "warning", "")
 
     new_msg = {"role": "user", "content": f"[GUI Worker] {last_result}"}
     return {
@@ -602,8 +685,8 @@ def mcp_worker_node(state: CortexState) -> dict:
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
     instruction = str(state.get("_instruction", ""))
-    _log_fn(f"MCP: {instruction}", "step", "🔧")
-    print(f"[{time.strftime('%H:%M:%S')}] 🔧 MCP: {instruction}", flush=True)
+    _log_fn(f"MCP: {instruction}", "step", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  MCP: {instruction}", flush=True)
 
     langfuse_handler = CallbackHandler()
 
@@ -613,8 +696,8 @@ def mcp_worker_node(state: CortexState) -> dict:
         result_text = f"MCP error: {e}"
         logger.error("MCP error: %s", e)
 
-    _log_fn(f"MCP result: {result_text}", "info", "🔧")
-    print(f"[{time.strftime('%H:%M:%S')}] 🔧 Result: {result_text}", flush=True)
+    _log_fn(f"MCP result: {result_text}", "info", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  Result: {result_text}", flush=True)
 
     new_msg = {"role": "user", "content": f"[MCP Worker] {result_text}"}
     return {
@@ -673,12 +756,12 @@ async def _mcp_worker_async(instruction: str, callbacks: list = None) -> str:
                 ))
                 continue
                 
-            logger.info("🔧 Calling %s.%s(%s)", server, tool_name, json.dumps(func_args, default=str)[:200])
+            logger.info(" Calling %s.%s(%s)", server, tool_name, json.dumps(func_args, default=str)[:200])
             try:
                 result = await tm.call_tool(server, tool_name, func_args)
                 result_str = str(result)
             except Exception as e:
-                logger.error("🔧 Tool Failed: %s", e)
+                logger.error(" Tool Failed: %s", e)
                 result_str = f"Error executing tool: {e}"
                 
             messages.append(ToolMessage(
@@ -689,6 +772,79 @@ async def _mcp_worker_async(instruction: str, callbacks: list = None) -> str:
         print(f"JIT Loop Step {step}: Finished executing tools, looping...", flush=True)
 
     return "MCP Worker JIT Loop hit maximum steps without finishing."
+
+
+# ── Infra Worker Node (Terminal + UI Tools) ──────────────────────────────────
+
+
+@observe(name="infra_worker_node")
+def infra_worker_node(state: CortexState) -> dict:
+    """Executes infrastructure tasks: terminal commands, UI tree inspection, direct UI interaction."""
+    if _is_stopped():
+        return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
+
+    instruction = str(state.get("_instruction", ""))
+    _log_fn(f"Infra: {instruction}", "step", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  Infra: {instruction}", flush=True)
+
+    llm_with_tools = _llm.bind(tools=INFRA_TOOLS)
+    langfuse_handler = CallbackHandler()
+    config = {"callbacks": [langfuse_handler]}
+    messages = [
+        {"role": "system", "content": INFRA_WORKER_SYSTEM_PROMPT},
+        {"role": "user", "content": instruction},
+    ]
+
+    result_text = "Infra worker completed."
+    try:
+        for step in range(15):
+            response = llm_with_tools.invoke(messages, config=config)
+            messages.append(response)
+
+            if not hasattr(response, "tool_calls") or not response.tool_calls:
+                if isinstance(response.content, list):
+                    text_parts = []
+                    for part in response.content:
+                        if isinstance(part, dict) and "text" in part:
+                            text_parts.append(part["text"])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    result_text = "\n".join(text_parts).strip()
+                else:
+                    result_text = str(response.content)
+                break
+
+            for tc in response.tool_calls:
+                func_name = tc["name"]
+                func_args = tc["args"]
+                tool_call_id = tc["id"]
+                print(f"[{time.strftime('%H:%M:%S')}]  Tool: {func_name}", flush=True)
+
+                try:
+                    tool_result = handle_infra_tool(func_name, func_args)
+                except Exception as e:
+                    tool_result = json.dumps({"error": str(e)})
+
+                messages.append(ToolMessage(
+                    tool_call_id=tool_call_id,
+                    name=func_name,
+                    content=tool_result,
+                ))
+        else:
+            result_text = "Infra worker hit maximum steps."
+    except Exception as e:
+        result_text = f"Infra error: {e}"
+        logger.error("Infra error: %s", e)
+
+    _log_fn(f"Infra result: {result_text}", "info", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  Done: {result_text}", flush=True)
+
+    new_msg = {"role": "user", "content": f"[Infra Worker] {result_text}"}
+    return {
+        "last_worker_result": result_text,
+        "messages": state["messages"] + [new_msg],
+        "next_node": "orchestrator",
+    }
 
 
 # ── Code Worker Node (CodeAgent wrapper) ─────────────────────────────────────
@@ -721,8 +877,8 @@ def code_worker_node(state: CortexState) -> dict:
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
     instruction = str(state.get("_instruction", ""))
-    _log_fn(f"Code Agent: {instruction}", "step", "💻")
-    print(f"[{time.strftime('%H:%M:%S')}] 💻 Code Agent: {instruction}", flush=True)
+    _log_fn(f"Code Agent: {instruction}", "step", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  Code Agent: {instruction}", flush=True)
 
     agent = _get_code_agent()
     screenshot_bytes = state.get("screenshot") or _capture_screenshot_bytes()
@@ -742,7 +898,6 @@ def code_worker_node(state: CortexState) -> dict:
             task_instruction=full_instruction,
             screenshot=screenshot_bytes,
             env_controller=_local_controller,
-            stop_flag=_stop_flag,
         )
 
         completion = result.get("completion_reason", "UNKNOWN")
@@ -757,8 +912,8 @@ def code_worker_node(state: CortexState) -> dict:
         result_text = f"Code Agent error: {e}"
         logger.error("Code Agent error: %s", e)
 
-    _log_fn(f"Code done: {result_text}", "info", "💻")
-    print(f"[{time.strftime('%H:%M:%S')}] 💻 Done: {result_text}", flush=True)
+    _log_fn(f"Code done: {result_text}", "info", "")
+    print(f"[{time.strftime('%H:%M:%S')}]  Done: {result_text}", flush=True)
 
     new_msg = {"role": "user", "content": f"[Code Worker] {result_text}"}
     return {
@@ -773,7 +928,7 @@ def code_worker_node(state: CortexState) -> dict:
 
 def _route(state: CortexState) -> str:
     n = state.get("next_node", "__end__")
-    return n if n in ("gui_worker", "mcp_worker", "code_worker") else "__end__"
+    return n if n in ("gui_worker", "mcp_worker", "code_worker", "infra_worker") else "__end__"
 
 
 def build_graph():
@@ -782,16 +937,19 @@ def build_graph():
     g.add_node("gui_worker", gui_worker_node)
     g.add_node("mcp_worker", mcp_worker_node)
     g.add_node("code_worker", code_worker_node)
+    g.add_node("infra_worker", infra_worker_node)
     g.set_entry_point("orchestrator")
     g.add_conditional_edges("orchestrator", _route, {
         "gui_worker": "gui_worker",
         "mcp_worker": "mcp_worker",
         "code_worker": "code_worker",
+        "infra_worker": "infra_worker",
         "__end__": END,
     })
     g.add_edge("gui_worker", "orchestrator")
     g.add_edge("mcp_worker", "orchestrator")
     g.add_edge("code_worker", "orchestrator")
+    g.add_edge("infra_worker", "orchestrator")
     return g.compile()
 
 
@@ -816,8 +974,9 @@ class Cortex:
         show_ui: Callable[[], None] = lambda: None,
         stop_flag: Optional[threading.Event] = None,
         log_fn: Callable[..., None] = lambda msg, *a, **kw: None,
+        todo_fn: Callable[..., None] = lambda items: None,
     ):
-        global _llm, _hide_ui_fn, _show_ui_fn, _stop_flag, _log_fn
+        global _llm, _hide_ui_fn, _show_ui_fn, _stop_flag, _log_fn, _todo_fn
 
         self.max_steps = max_steps
 
@@ -826,6 +985,7 @@ class Cortex:
         _show_ui_fn = show_ui
         _stop_flag = stop_flag
         _log_fn = log_fn
+        _todo_fn = todo_fn
 
         # Single shared LLM
         self.llm = ChatGoogleGenerativeAI(
@@ -860,7 +1020,7 @@ class Cortex:
             # asyncio.to_thread prevents blocking the caller's event loop.
             tm = await asyncio.to_thread(_run_in_bg_loop, _ensure_tool_manager())
             self._mcp_tool_desc = tm.get_tools_description()
-            _log_fn("MCP tools loaded.", "success", "🔧")
+            _log_fn("MCP tools loaded.", "success", "")
             print(f"[{time.strftime('%H:%M:%S')}] ✅ MCP:\n{self._mcp_tool_desc}", flush=True)
         except Exception as e:
             logger.warning("MCP init failed: %s", e)
@@ -869,7 +1029,7 @@ class Cortex:
     @observe(name="cortex_run")
     def run(self, task: str) -> dict:
         """Run the full orchestrator loop. Returns the final state."""
-        _log_fn(f"Task: {task}", "info", "📋")
+        _log_fn(f"Task: {task}", "info", "")
         print(f"\n{'='*60}\n[{time.strftime('%H:%M:%S')}] 🚀 CORTEX: {task}\n{'='*60}", flush=True)
 
         initial_state: CortexState = {
@@ -886,6 +1046,8 @@ class Cortex:
             "_instruction": "",
             "vscode_prompt": "",
             "slack_reply_context": "",
+            "todo_list": [],
+            "current_todo_index": 0,
         }
 
         final_state = self.graph.invoke(initial_state)

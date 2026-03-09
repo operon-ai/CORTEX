@@ -1,66 +1,80 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; connect-src ws://localhost:7577 https://*.google.com https://*.googleapis.com; style-src 'self' 'unsafe-inline'; media-src 'self' https:;" />
+    content="default-src 'self'; connect-src ws://localhost:7577 https://*.google.com https://*.googleapis.com; style-src 'self' 'unsafe-inline'; media-src 'self' https:;" />
   <link rel="stylesheet" href="style.css" />
   <title>Cortex</title>
 </head>
+
 <body>
-  <div class="panel" id="panel">
 
-    <!-- Header — drag region -->
-    <header class="header" id="dragRegion">
-      <div class="brand">
-        <span class="brand-name">CORTEX</span>
-        <span class="conn-dot" id="connIndicator" data-state="disconnected"></span>
-        <span class="conn-label" id="connLabel">Offline</span>
+  <div class="island" id="island">
+
+    <!-- Collapsed pill — always visible -->
+    <div class="island-pill" id="islandPill">
+      <span class="pill-icon" id="pillIcon">&middot;</span>
+      <span class="pill-dot" id="pillDot" data-status="idle"></span>
+      <span class="pill-label" id="pillLabel">Ready</span>
+      <span class="pill-steps" id="pillSteps"></span>
+      <div class="pill-controls">
+        <button class="btn-icon" id="btnMinimize" title="Minimize">&minus;</button>
+        <button class="btn-icon btn-close" id="btnClose" title="Close">&times;</button>
       </div>
-      <div class="header-right">
-        <span class="status-label" id="statusPill" data-status="idle"><span id="statusText">Idle</span></span>
-        <button class="btn-icon-only" id="btnMinimize" title="Minimize">&minus;</button>
-        <button class="btn-icon-only btn-close" id="btnClose" title="Close">&times;</button>
+    </div>
+
+    <!-- Expanded dropdown — visible on hover -->
+    <div class="island-body" id="islandBody">
+
+      <!-- Header row -->
+      <div class="body-header">
+        <div class="brand">
+          <span class="brand-name">CORTEX</span>
+          <span class="conn-dot" id="connIndicator" data-state="disconnected"></span>
+          <span class="conn-label" id="connLabel">Offline</span>
+        </div>
+        <span class="status-badge" id="statusPill" data-status="idle"><span id="statusText">Idle</span></span>
       </div>
-    </header>
 
-    <!-- Input row -->
-    <div class="input-row">
-      <input
-        type="text"
-        class="task-input"
-        id="taskInput"
-        placeholder="What should I do?"
-        spellcheck="false"
-        autocomplete="off"
-      />
-      <button class="btn-mic" id="btnMic" title="Voice input">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-      </button>
-      <button class="btn-send" id="btnRun" title="Run">&#9654;</button>
-      <button class="btn-stop" id="btnStop" title="Stop" disabled>&#9632;</button>
+      <!-- Split View -->
+      <div class="split-view">
+        <!-- Todo List -->
+        <div class="todo-list" id="todoList" style="display: none;"></div>
+
+        <!-- Step feed -->
+        <div class="step-feed" id="feed"></div>
+      </div>
+
+      <!-- Input -->
+      <div class="input-row">
+        <input type="text" class="task-input" id="taskInput" placeholder="What should I do?" spellcheck="false"
+          autocomplete="off" />
+        <button class="btn-mic" id="btnMic" title="Voice input">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
+          </svg>
+        </button>
+        <button class="btn-send" id="btnRun" title="Run">&#9654;</button>
+        <button class="btn-stop" id="btnStop" title="Stop" disabled>&#9632;</button>
+      </div>
+
+      <!-- Progress -->
+      <div class="progress-track" id="progressTrack">
+        <div class="progress-bar"></div>
+      </div>
     </div>
-
-    <!-- Progress -->
-    <div class="progress-track" id="progressTrack">
-      <div class="progress-bar" id="progressBar"></div>
-    </div>
-
-    <!-- Current step — only shows the latest one -->
-    <div class="current-step" id="feed">
-      <span class="step-idle" id="stepIdle">Ready</span>
-    </div>
-
-    <!-- Hidden elements referenced by app.ts -->
-    <span id="stepCount" style="display:none">0</span>
 
   </div>
+
+  <span id="stepCount" style="display:none">0</span>
   <script src="app.js"></script>
 </body>
+
 </html>

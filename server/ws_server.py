@@ -56,6 +56,7 @@ async def _on_startup() -> None:
         show_ui=_show_ui,
         stop_flag=_stop_flag,
         log_fn=log_to_ui,
+        todo_fn=push_todo,
     )
     # Perform warm-up (connect MCP, start agents)
     await _cortex.warm_up()
@@ -97,6 +98,14 @@ def log_to_ui(message: str, level: str = "info", icon: str = "") -> None:
 def set_status(status: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [STATUS] → {status}", flush=True)
     _push({"type": "status", "status": status})
+
+
+def push_todo(items: list) -> None:
+    """Push an updated todo list to the UI."""
+    _push({
+        "type": "todo_update",
+        "items": items
+    })
 
 
 def _hide_ui() -> None:
