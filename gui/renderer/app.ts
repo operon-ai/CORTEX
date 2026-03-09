@@ -24,7 +24,14 @@ interface ParsedStep {
   timestamp: string;
 }
 
-type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' } | { type: 'transcript'; text: string } | { type: 'todo_update'; items: Array<{ id: number, text: string, status: 'pending' | 'in_progress' | 'done' | 'failed' }> };
+interface TodoItem {
+  id: number;
+  text: string;
+  status: 'pending' | 'in_progress' | 'done' | 'failed';
+  subtasks?: TodoItem[];
+}
+
+type ServerMessage = LogMessage | StatusMessage | { type: 'pong' } | { type: 'hide' } | { type: 'show' } | { type: 'transcript'; text: string } | { type: 'todo_update'; items: TodoItem[] };
 type ClientMessage = { type: 'start_task'; task: string } | { type: 'stop_task' } | { type: 'ping' } | { type: 'stt_audio'; data: string };
 type ConnState = 'connected' | 'connecting' | 'disconnected';
 
@@ -305,7 +312,7 @@ function handle(msg: ServerMessage): void {
   }
 }
 
-function renderTodoList(items: Array<{ id: number, text: string, status: string }>) {
+function renderTodoList(items: TodoItem[]) {
   if (!items || items.length === 0) {
     todoListEl.style.display = 'none';
     return;
@@ -313,24 +320,56 @@ function renderTodoList(items: Array<{ id: number, text: string, status: string 
   todoListEl.style.display = 'flex';
   todoListEl.innerHTML = '';
   items.forEach(item => {
-    const div = document.createElement('div');
-    div.className = `todo-item status-${item.status}`;
-
-    const icon = document.createElement('span');
-    icon.className = 'todo-icon';
-    if (item.status === 'done') icon.innerHTML = '✅';
-    else if (item.status === 'in_progress') icon.innerHTML = '🔄';
-    else if (item.status === 'failed') icon.innerHTML = '❌';
-    else icon.innerHTML = '⬜';
-
-    const text = document.createElement('span');
-    text.className = 'todo-text';
-    text.textContent = item.text;
-
-    div.appendChild(icon);
-    div.appendChild(text);
-    todoListEl.appendChild(div);
+    todoListEl.appendChild(createTodoElement(item));
   });
+}
+
+function createTodoElement(item: TodoItem, depth: number = 0): HTMLElement {
+  const container = document.createElement('div');
+  container.className = `todo-container depth-${depth}`;
+
+  const itemRow = document.createElement('div');
+  itemRow.className = `todo-item status-${item.status}`;
+  if (item.subtasks && item.subtasks.length > 0) {
+    itemRow.classList.add('has-children');
+    itemRow.onclick = () => {
+      container.classList.toggle('collapsed');
+    };
+  }
+
+  const icon = document.createElement('span');
+  icon.className = 'todo-icon';
+  if (item.status === 'done') icon.innerHTML = '✅';
+  else if (item.status === 'in_progress') icon.innerHTML = '🔄';
+  else if (item.status === 'failed') icon.innerHTML = '❌';
+  else icon.innerHTML = '⬜';
+
+  const text = document.createElement('span');
+  text.className = 'todo-text';
+  text.textContent = item.text;
+
+  itemRow.appendChild(icon);
+  itemRow.appendChild(text);
+
+  if (item.subtasks && item.subtasks.length > 0) {
+    const arrow = document.createElement('span');
+    arrow.className = 'todo-arrow';
+    arrow.innerHTML = '▾';
+    itemRow.appendChild(arrow);
+  }
+
+  container.appendChild(itemRow);
+
+  if (item.subtasks && item.subtasks.length > 0) {
+    const childrenContainer = document.createElement('div');
+    childrenContainer.className = 'todo-children';
+    item.subtasks.forEach(sub => {
+      childrenContainer.appendChild(createTodoElement(sub, depth + 1));
+    });
+    container.appendChild(childrenContainer);
+  }
+
+  return container;
 }
 
 // ── UI ───────────────────────────────────────────────────────────────────

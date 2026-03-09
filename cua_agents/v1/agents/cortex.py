@@ -274,7 +274,7 @@ def orchestrator_node(state: CortexState) -> dict:
             _log_fn(f" Plan: {len(todo_list)} steps", "info", "")
             
         # Send flattened/top-level only to UI so JS doesn't break
-        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+        _todo_fn(todo_list)
 
     # Subsequent steps: evaluate previous step and advance IF todo_list wasn't just completely rewritten
     elif todo_list and step > 0:
@@ -297,14 +297,14 @@ def orchestrator_node(state: CortexState) -> dict:
         if current_idx < len(todo_list) and todo_list[current_idx]["status"] == "pending":
             todo_list[current_idx]["status"] = "in_progress"
 
-        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+        _todo_fn(todo_list)
 
     # If ending, mark all top-level remaining as done (if no failures)
     if next_node == "__end__" and todo_list:
         for item in todo_list:
             if item["status"] in ("pending", "in_progress"):
                 item["status"] = "done"
-        _todo_fn([{"id": x["id"], "text": x["text"], "status": x["status"]} for x in todo_list])
+        _todo_fn(todo_list)
 
     str_instruction = str(instruction)
     _log_fn(f"→ {next_node}: {str_instruction}", "step", "")
@@ -784,8 +784,23 @@ def infra_worker_node(state: CortexState) -> dict:
         return {"last_worker_result": "Stopped.", "messages": state["messages"], "next_node": "orchestrator"}
 
     instruction = str(state.get("_instruction", ""))
+    vscode_prompt = state.get("vscode_prompt", "")
     _log_fn(f"Infra: {instruction}", "step", "")
     print(f"[{time.strftime('%H:%M:%S')}]  Infra: {instruction}", flush=True)
+
+    # Detect VSCode chatbox tasks and inject the prompt for the infra worker
+    if vscode_prompt and _is_vscode_chatbox_task(instruction):
+        _log_fn("VSCode chatbox task detected (Infra) — injecting orchestrator prompt.", "info", "")
+        print(f"[{time.strftime('%H:%M:%S')}]  Injecting vscode_prompt into Infra instruction", flush=True)
+        instruction = (
+            f"{instruction}\n\n"
+            f"IMPORTANT: Use the 'Message input' element. Type the following "
+            f"prompt EXACTLY as written, then press Enter:\n\n"
+            f"--- BEGIN PROMPT ---\n"
+            f"{vscode_prompt}\n"
+            f"--- END PROMPT ---\n\n"
+            f"After typing, verify that the AI in VS Code has started responding."
+        )
 
     llm_with_tools = _llm.bind(tools=INFRA_TOOLS)
     langfuse_handler = CallbackHandler()
@@ -844,6 +859,7 @@ def infra_worker_node(state: CortexState) -> dict:
         "last_worker_result": result_text,
         "messages": state["messages"] + [new_msg],
         "next_node": "orchestrator",
+        "vscode_prompt": "",
     }
 
 
