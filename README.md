@@ -2,6 +2,10 @@
 
 CORTEX is a high-performance, multimodal desktop automation agent designed to orchestrate complex tasks across various applications using a combination of a large-scale reasoning brain and specialized visual grounding models.
 
+## Watch CORTEX in Action
+
+[![CORTEX Demo](https://img.youtube.com/vi/yyZtm4mEG04/0.jpg)](https://youtu.be/yyZtm4mEG04?si=Nb_8RFAJDVjuDNvb)
+
 ## Architecture: "Brain & Hands"
 
 CORTEX operates on a modular architecture that separates reasoning from execution:
