@@ -2,74 +2,79 @@
 
 CORTEX is a high-performance, multimodal desktop automation agent designed to orchestrate complex tasks across various applications using a combination of a large-scale reasoning brain and specialized visual grounding models.
 
-## 🚀 Architecture
+## Architecture: "Brain & Hands"
 
-CORTEX operates on a modular "Brain & Hands" architecture:
+CORTEX operates on a modular architecture that separates reasoning from execution:
 
-- **The Brain (Orchestrator)**: Powered by **Azure OpenAI (gpt-5-mini)**. It manages high-level reasoning, task decomposition, and tool orchestration.
-- **The Hands (Grounding)**: Powered by **EvoCUA-8B**. It specializes in visual grounding, translating natural language instructions into precise screen coordinates and UI interactions.
-- **The Interface**: A modern **Electron-based UI** that communicates with the CORTEX brain via a **WebSocket server** (port 7577).
-- **The Infrastructure**: Supports **MCP (Model Context Protocol)** for external tool integration (Slack, Notion, etc.) and a **Local Coding Agent** for direct file and system manipulation.
+- **The Brain (Orchestrator)**: Powered by **Azure OpenAI (gpt-5-mini)**. It manages high-level reasoning, task decomposition into TODOs, and routing between specialized worker nodes.
+- **The Hands (GUI Grounding)**: Powered by **EvoCUA-8B**. It specializes in visual grounding, translating natural language instructions into precise screen coordinates and UI interactions (click, type, scroll, etc.).
+- **Worker Nodes**:
+    - **GUI Worker**: Screen-based interaction via EvoCUA.
+    - **MCP Worker**: External service integration (Slack, Notion, etc.) via Model Context Protocol.
+    - **Code Worker**: Local Python and Bash execution for complex file processing.
+    - **Infra Worker**: Direct Windows UI Automation (UIA) and terminal commands.
 
-## 🛠️ Installation
+## Codebase Structure
 
-CORTEX uses [**uv**](https://github.com/astral-sh/uv) for fast and reproducible dependency management.
+### Backend (Python / FastAPI)
+- `server/ws_server.py`: The central hub that manages WebSocket connections, initializes the Cortex brain, and handles audio (STT/TTS).
+- `cua_agents/v1/agents/cortex.py`: The LangGraph-powered orchestrator that defines the "state loop" of the agent.
+- `cua_agents/v1/agents/evocua_agent.py`: Specialized agent for the EvoCUA visual model.
+- `cua_agents/v1/utils/azure_audio.py`: Azure Cognitive Services integration for high-quality speech-to-text and text-to-speech.
 
-### 1. Install uv
+### Frontend (Electron / Vite)
+- `gui/main.js`: Electron main process. Manages the transparent, glassmorphic "island" window and IPC communications.
+- `gui/renderer/app.js`: Vue-like reactive logic (vanilla JS) that handles the WebSocket protocol, task input, feed rendering, and real-time TODO checklist updates.
+- `gui/renderer/style.css`: Modern, premium design system with dark mode, animations, and responsive layouts.
+
+## WebSocket Architecture
+
+The frontend and backend communicate via a real-time WebSocket protocol (port 7577):
+
+1. **Task Flow**: User enters a task → `start_task` (WS) → Cortex Brain starts → Status/Logs/TODOs streamed back → `done` (WS).
+2. **Audio Flow**: User speaks → Audio captured in browser → `stt_audio` (WS) → Azure Transcription → Transcribed text sent back to input field.
+3. **Feedback Loop**: Every action taken by a worker node is reported back to the Orchestrator and the UI simultaneously for full transparency.
+
+## Installation & Setup
+
+### Prerequisites
+- **Python 3.10+** (Recommend using a virtual environment).
+- **Node.js 18+** (For the Electron GUI).
+- **Tesseract OCR**: Required for text-based UI inspection. [Download for Windows](https://github.com/UB-Mannheim/tesseract/wiki).
+
+### 1. Backend Setup
 ```powershell
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Create and activate virtual environment
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# Install dependencies
+pip install -e .
+pip install azure-cognitiveservices-speech langchain-openai httpx
 ```
 
-### 2. Clone and Setup
-```bash
-git clone https://github.com/operon-ai/CORTEX.git
-cd CORTEX
-uv sync
-```
-
-### 3. External Dependencies
-- **Tesseract OCR**: Required for text grounding. [Download for Windows](https://github.com/UB-Mannheim/tesseract/wiki).
-- **Node.js**: Required for the Electron frontend.
-
-## ⚙️ Configuration
-
-1. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Fill in your **Azure OpenAI** credentials and **EvoCUA** endpoint details.
-
-## 🖥️ Running CORTEX
-
-### Starting the WebSocket Server
-The backend server bridges the brain to the UI:
-```bash
-uv run python server/ws_server.py
-```
-
-### Starting the UI
-(Assuming node is installed and you are in the frontend directory)
-```bash
+### 2. Frontend Setup
+```powershell
+cd gui
 npm install
-npm run dev
 ```
 
-## 🔌 Core Components
+### 3. Configuration
+1. Copy `.env.example` to `.env`.
+2. Provide your **Azure OpenAI** credentials (Endpoint, API Key, Deployment Names).
+3. Provide your **Azure Speech** credentials (Key and Region).
 
-### WebSocket Architecture
-The Electron frontend sends user tasks to the Python server via WebSockets. The server then:
-1. Captures system screenshots.
-2. Forwards them to the Orchestrator.
-3. Decides on the next action (GUI, MCP, or Code).
-4. Streams logs and status updates back to the UI.
+## Running CORTEX
 
-### Model Configuration
-- **Orchestrator**: `gpt-5-mini` (Azure)
-- **Grounding**: `meituan/EvoCUA-8B-20260105`
+CORTEX provides a unified launcher to start both the server and the GUI in one command:
 
-## ⚠️ Security
-The **Local Coding Agent** executes arbitrary Python and Bash code. Use with caution in trusted environments.
+```powershell
+python start.py
+```
+
+- Follow the real-time logs in the Electron island.
+- Use the Microphone icon for voice-driven tasks.
+- Monitor the TODO checklist to track progress on long-running tasks.
 
 ---
 © 2026 Operon AI. All rights reserved.

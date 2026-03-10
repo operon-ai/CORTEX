@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, Optional
 
 from cua_agents.v1.memory.procedural_memory import PROCEDURAL_MEMORY
 from cua_agents.v1.utils.common_utils import call_llm_safe, split_thinking_response
-from cua_agents.v1.core.mllm import LMMAgent
+from cua_agents.v1.utils.lmm_utils import LMMAgent
 
 logger = logging.getLogger("cortex.agent")
 

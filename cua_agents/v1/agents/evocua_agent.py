@@ -221,7 +221,7 @@ class EvoCUAAgent:
             return {"action_description": "Loop detected — auto-terminating", "raw_response": response_text}, ["FAIL"]
         if loop_info["warning"]:
             self._loop_warning = loop_info["warning"]
-            print(f"[LOOP] Warning injected: {self._loop_warning[:80]}…", flush=True)
+            print(f"[LOOP] Warning injected: {self._loop_warning[:80]}...", flush=True)
         else:
             self._loop_warning = ""
 
@@ -317,7 +317,7 @@ Analyze the history above and provide a detailed status for the orchestrator."""
         if streak >= 3:
             banned_action = self._describe_action(last)
             result["warning"] = (
-                f"⚠️ LOOP DETECTED: You have repeated the same action "
+                f"LOOP DETECTED: You have repeated the same action "
                 f"{streak} times in a row: \"{banned_action}\".\n"
                 f"This approach is NOT working. You MUST try a completely "
                 f"different action. Do NOT repeat \"{banned_action}\" again.\n"
@@ -341,7 +341,7 @@ Analyze the history above and provide a detailed status for the orchestrator."""
                 y_spread = max(ys) - min(ys)
                 if x_spread <= 30 and y_spread <= 30:
                     result["warning"] = (
-                        f"⚠️ LOOP DETECTED: You have clicked on nearly the same "
+                        f"LOOP DETECTED: You have clicked on nearly the same "
                         f"spot ({recent_coords[-1]}) for the last 3 steps.\n"
                         f"The click target may be wrong. Carefully re-examine the "
                         f"screenshot and click on a DIFFERENT element."
@@ -352,7 +352,7 @@ Analyze the history above and provide a detailed status for the orchestrator."""
         if len(codes) >= 4:
             if codes[-1] == codes[-3] and codes[-2] == codes[-4] and codes[-1] != codes[-2]:
                 result["warning"] = (
-                    f"⚠️ LOOP DETECTED: You are alternating between two actions "
+                    f"LOOP DETECTED: You are alternating between two actions "
                     f"without making progress. Break the cycle by trying a "
                     f"completely different approach to accomplish the task."
                 )

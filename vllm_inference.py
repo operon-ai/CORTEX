@@ -14,7 +14,7 @@ vllm_image = (
     .env({"HF_XET_HIGH_PERFORMANCE": "1"})  # faster model transfers
 )
 
-MODEL_NAME = "meituan/EvoCUA-32B-20260105"
+MODEL_NAME = "meituan/EvoCUA-8B-20260105"
 # MODEL_REVISION = "953532f942706930ec4bb870569932ef63038fdf"  # avoid nasty surprises when repos update!
 
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
@@ -32,7 +32,7 @@ VLLM_PORT = 8000
 
 @app.function(
     image=vllm_image,
-    gpu=f"A100-80GB",
+    gpu=f"A100",
     scaledown_window=10 * MINUTES,  # how long should we stay up with no requests?
     timeout=10 * MINUTES,  # how long should we wait for container start?
     volumes={
