@@ -1,421 +1,81 @@
 import argparse
-from dotenv import load_dotenv
-load_dotenv()  # Load .env file from current directory or parent directories
-import base64
-import datetime
-import io
 import logging
 import os
-import platform
-import pyautogui
 import signal
 import sys
-import time
+import threading
+from dotenv import load_dotenv
 
-from PIL import Image
-from langfuse import observe, get_client
+# Path hack to ensure we can import from parent directory if needed
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cua_agents.v1.agents.grounding import OSWorldACI
 from cua_agents.v1.agents.cortex import Cortex
-from cua_agents.v1.utils.local_env import LocalEnv
 
-current_platform = platform.system().lower()
+load_dotenv()
 
-# Global flag to track pause state for debugging
-paused = False
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("cli_app")
 
-
-def get_char():
-    """Get a single character from stdin without pressing Enter"""
-    try:
-        # Import termios and tty on Unix-like systems
-        if platform.system() in ["Darwin", "Linux"]:
-            import termios
-            import tty
-
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setraw(sys.stdin.fileno())
-                ch = sys.stdin.read(1)
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-            return ch
-        else:
-            # Windows fallback
-            import msvcrt
-
-            return msvcrt.getch().decode("utf-8", errors="ignore")
-    except:
-        return input()  # Fallback for non-terminal environments
-
+# Global stop event for signal handling
+stop_event = threading.Event()
 
 def signal_handler(signum, frame):
-    """Handle Ctrl+C signal for debugging during agent execution"""
-    global paused
-
-    if not paused:
-        print("\n\n🔸 Cortex Workflow Paused 🔸")
-        print("=" * 50)
-        print("Options:")
-        print("  • Press Ctrl+C again to quit")
-        print("  • Press Esc to resume workflow")
-        print("=" * 50)
-
-        paused = True
-
-        while paused:
-            try:
-                print("\n[PAUSED] Waiting for input... ", end="", flush=True)
-                char = get_char()
-
-                if ord(char) == 3:  # Ctrl+C
-                    print("\n\n🛑 Exiting Cortex...")
-                    sys.exit(0)
-                elif ord(char) == 27:  # Esc
-                    print("\n\n▶️  Resuming Cortex workflow...")
-                    paused = False
-                    break
-                else:
-                    print(f"\n   Unknown command: '{char}' (ord: {ord(char)})")
-
-            except KeyboardInterrupt:
-                print("\n\n🛑 Exiting Cortex...")
-                sys.exit(0)
+    """Handle Ctrl+C to stop the orchestrator gracefully."""
+    if not stop_event.is_set():
+        print("\n\n🛑 STOP REQUESTED (Ctrl+C). Finishing current step then exiting...")
+        stop_event.set()
     else:
-        # Already paused, second Ctrl+C means quit
-        print("\n\n🛑 Exiting Cortex...")
-        sys.exit(0)
+        print("\n\n🛑 EMERGENCY EXIT.")
+        sys.exit(1)
 
-
-# Set up signal handler for Ctrl+C
 signal.signal(signal.SIGINT, signal_handler)
 
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-
-datetime_str: str = datetime.datetime.now().strftime("%Y%m%d@%H%M%S")
-
-log_dir = "logs"
-os.makedirs(log_dir, exist_ok=True)
-
-file_handler = logging.FileHandler(
-    os.path.join("logs", "normal-{:}.log".format(datetime_str)), encoding="utf-8"
-)
-debug_handler = logging.FileHandler(
-    os.path.join("logs", "debug-{:}.log".format(datetime_str)), encoding="utf-8"
-)
-stdout_handler = logging.StreamHandler(sys.stdout)
-sdebug_handler = logging.FileHandler(
-    os.path.join("logs", "sdebug-{:}.log".format(datetime_str)), encoding="utf-8"
-)
-
-file_handler.setLevel(logging.INFO)
-debug_handler.setLevel(logging.DEBUG)
-stdout_handler.setLevel(logging.INFO)
-sdebug_handler.setLevel(logging.DEBUG)
-
-formatter = logging.Formatter(
-    fmt="\x1b[1;33m[%(asctime)s \x1b[31m%(levelname)s \x1b[32m%(module)s/%(lineno)d-%(processName)s\x1b[1;33m] \x1b[0m%(message)s"
-)
-file_handler.setFormatter(formatter)
-debug_handler.setFormatter(formatter)
-stdout_handler.setFormatter(formatter)
-sdebug_handler.setFormatter(formatter)
-
-stdout_handler.addFilter(logging.Filter("cortex"))
-sdebug_handler.addFilter(logging.Filter("cortex"))
-
-logger.addHandler(file_handler)
-logger.addHandler(debug_handler)
-logger.addHandler(stdout_handler)
-logger.addHandler(sdebug_handler)
-
-platform_os = platform.system()
-
-
-def show_permission_dialog(code: str, action_description: str):
-    """Show a platform-specific permission dialog and return True if approved."""
-    if platform.system() == "Darwin":
-        result = os.system(
-            f'osascript -e \'display dialog "Do you want to execute this action?\n\n{code} which will try to {action_description}" with title "Action Permission" buttons {{"Cancel", "OK"}} default button "OK" cancel button "Cancel"\''
-        )
-        return result == 0
-    elif platform.system() == "Linux":
-        result = os.system(
-            f'zenity --question --title="Action Permission" --text="Do you want to execute this action?\n\n{code}" --width=400 --height=200'
-        )
-        return result == 0
-    return False
-
-
-def scale_screen_dimensions(width: int, height: int, max_dim_size: int):
-    scale_factor = min(max_dim_size / width, max_dim_size / height, 1)
-    safe_width = int(width * scale_factor)
-    safe_height = int(height * scale_factor)
-    return safe_width, safe_height
-
-
-@observe(name="cortex_run")
-def run_agent(agent, instruction: str, scaled_width: int, scaled_height: int):
-    global paused
-    langfuse = get_client()
-    langfuse.update_current_trace(name=instruction)
-    obs = {}
-    traj = "Task:\n" + instruction
-    subtask_traj = ""
-    for step in range(15):
-        # Check if we're in paused state and wait
-        while paused:
-            time.sleep(0.1)
-        # Get screen shot using pyautogui
-        screenshot = pyautogui.screenshot()
-        screenshot = screenshot.resize((scaled_width, scaled_height), Image.LANCZOS)
-
-        # Save the screenshot to a BytesIO object
-        buffered = io.BytesIO()
-        screenshot.save(buffered, format="PNG")
-
-        # Get the byte value of the screenshot
-        screenshot_bytes = buffered.getvalue()
-        # Convert to base64 string.
-        obs["screenshot"] = screenshot_bytes
-
-        # Check again for pause state before prediction
-        while paused:
-            time.sleep(0.1)
-
-        print(f"\nStep {step + 1}/15: Getting next action from agent...")
-
-        # Get next action code from the agent
-        info, code = agent.predict(instruction=instruction, observation=obs)
-
-        # Log step with screenshot to Langfuse
-        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        langfuse.update_current_span(
-            metadata={
-                "step": step + 1,
-                "action": code[0],
-            },
-            input={
-                "instruction": instruction,
-                "screenshot": f"data:image/png;base64,{screenshot_b64}",
-            },
-        )
-
-        if "done" in code[0].lower() or "fail" in code[0].lower():
-            if platform.system() == "Darwin":
-                os.system(
-                    f'osascript -e \'display dialog "Task Completed" with title "OpenACI Agent" buttons "OK" default button "OK"\''
-                )
-            elif platform.system() == "Linux":
-                os.system(
-                    f'zenity --info --title="OpenACI Agent" --text="Task Completed" --width=200 --height=100'
-                )
-
-            break
-
-        if "next" in code[0].lower():
-            continue
-
-        if "wait" in code[0].lower():
-            print("\u23f3 Agent requested wait...")
-            time.sleep(5)
-            continue
-
-        else:
-            time.sleep(1.0)
-            print("EXECUTING CODE:", code[0])
-
-            # Check for pause state before execution
-            while paused:
-                time.sleep(0.1)
-
-            # Ask for permission before executing
-            exec(code[0])
-            time.sleep(1.0)
-
-            # Update task and subtask trajectories
-            if "reflection" in info and "executor_plan" in info:
-                traj += (
-                    "\n\nReflection:\n"
-                    + str(info["reflection"])
-                    + "\n\n----------------------\n\nPlan:\n"
-                    + info["executor_plan"]
-                )
-
-    # Flush Langfuse events at end of task
-    langfuse.flush()
-
+def console_log(msg: str, level: str = "info", icon: str = ""):
+    """Callback for Cortex to log to the console."""
+    icon_prefix = f"{icon} " if icon else ""
+    print(f"[{level.upper()}] {icon_prefix}{msg}", flush=True)
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Cortex with specified model.")
-    parser.add_argument(
-        "--provider",
-        type=str,
-        default="openai",
-        help="Specify the provider to use (e.g., openai, anthropic, etc.)",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="gpt-5-2025-08-07",
-        help="Specify the model to use (e.g., gpt-5-2025-08-07)",
-    )
-    parser.add_argument(
-        "--model_url",
-        type=str,
-        default="",
-        help="The URL of the main generation model API.",
-    )
-    parser.add_argument(
-        "--model_api_key",
-        type=str,
-        default="",
-        help="The API key of the main generation model.",
-    )
-    parser.add_argument(
-        "--model_temperature",
-        type=float,
-        default=None,
-        help="Temperature to fix the generation model at (e.g. o3 can only be run with 1.0)",
-    )
-
-    # Grounding model config: Self-hosted endpoint based (required)
-    parser.add_argument(
-        "--ground_provider",
-        type=str,
-        required=True,
-        help="The provider for the grounding model",
-    )
-    parser.add_argument(
-        "--ground_url",
-        type=str,
-        required=True,
-        help="The URL of the grounding model",
-    )
-    parser.add_argument(
-        "--ground_api_key",
-        type=str,
-        default="",
-        help="The API key of the grounding model.",
-    )
-    parser.add_argument(
-        "--ground_model",
-        type=str,
-        required=True,
-        help="The model name for the grounding model",
-    )
-    parser.add_argument(
-        "--grounding_width",
-        type=int,
-        required=True,
-        help="Width of screenshot image after processor rescaling",
-    )
-    parser.add_argument(
-        "--grounding_height",
-        type=int,
-        required=True,
-        help="Height of screenshot image after processor rescaling",
-    )
-
-    # Cortex specific arguments
-    parser.add_argument(
-        "--max_trajectory_length",
-        type=int,
-        default=8,
-        help="Maximum number of image turns to keep in trajectory",
-    )
-    parser.add_argument(
-        "--enable_reflection",
-        action="store_true",
-        default=True,
-        help="Enable reflection agent to assist the worker agent",
-    )
-    parser.add_argument(
-        "--enable_local_env",
-        action="store_true",
-        default=False,
-        help="Enable local coding environment for code execution (WARNING: Executes arbitrary code locally)",
-    )
-    parser.add_argument(
-        "--task",
-        type=str,
-        help="The task instruction for Cortex to perform.",
-    )
-
+    parser = argparse.ArgumentParser(description="Cortex CLI Orchestrator")
+    parser.add_argument("task", type=str, nargs="?", help="The task for the agent to perform")
+    parser.add_argument("--max-steps", type=int, default=30, help="Maximum steps to allow")
+    
     args = parser.parse_args()
 
-    # Re-scales screenshot size to ensure it fits in UI-TARS context limit
-    screen_width, screen_height = pyautogui.size()
-    scaled_width, scaled_height = scale_screen_dimensions(
-        screen_width, screen_height, max_dim_size=2400
-    )
-
-    # Load the general engine params
-    engine_params = {
-        "engine_type": args.provider,
-        "model": args.model,
-        "base_url": args.model_url,
-        "api_key": args.model_api_key,
-        "temperature": getattr(args, "model_temperature", None),
-    }
-
-    # Load the grounding engine from a custom endpoint
-    engine_params_for_grounding = {
-        "engine_type": args.ground_provider,
-        "model": args.ground_model,
-        "base_url": args.ground_url,
-        "api_key": args.ground_api_key,
-        "grounding_width": args.grounding_width,
-        "grounding_height": args.grounding_height,
-    }
-
-    # Initialize environment based on user preference
-    local_env = None
-    if args.enable_local_env:
-        print(
-            "⚠️  WARNING: Local coding environment enabled. This will execute arbitrary code locally!"
-        )
-        local_env = LocalEnv()
-
-    grounding_agent = OSWorldACI(
-        env=local_env,
-        platform=current_platform,
-        engine_params_for_generation=engine_params,
-        engine_params_for_grounding=engine_params_for_grounding,
-        width=screen_width,
-        height=screen_height,
-    )
-
-    agent = Cortex(
-        engine_params,
-        grounding_agent,
-        platform=current_platform,
-        max_trajectory_length=args.max_trajectory_length,
-        enable_reflection=args.enable_reflection,
+    # Initialize Cortex
+    # Note: CLI doesn't need hide/show UI logic for itself usually, but we could add it if desired.
+    orchestrator = Cortex(
+        max_steps=args.max_steps,
+        stop_flag=stop_event,
+        log_fn=console_log
     )
 
     task = args.task
-
-    # handle query from command line
-    if isinstance(task, str) and task.strip():
-        agent.reset()
-        run_agent(agent, task, scaled_width, scaled_height)
+    if not task:
+        task = input("\n📝 Enter task description: ").strip()
+    
+    if not task:
+        print("Empty task. Exiting.")
         return
 
-    while True:
-        query = input("Query: ")
+    print("\n" + "="*80)
+    print(f"🚀 STARTING CORTEX: {task}")
+    print("="*80 + "\n")
 
-        agent.reset()
-
-        # Run the agent on your own device
-        run_agent(agent, query, scaled_width, scaled_height)
-
-        response = input("Would you like to provide another query? (y/n): ")
-        if response.lower() != "y":
-            break
-
+    try:
+        final_state = orchestrator.run(task)
+        print("\n" + "="*80)
+        print("✅ WORKFLOW COMPLETE")
+        print(f"Final Outcome: {final_state.get('last_worker_result', 'No result.')}")
+        print("="*80)
+    except Exception as e:
+        print(f"\n❌ CRITICAL ERROR: {e}")
+        logger.exception("Cortex crashed")
 
 if __name__ == "__main__":
     main()

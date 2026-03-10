@@ -3,3 +3,6 @@
 __pycache__
 uv.lock
 logs
+cua_agents/v1/test_all_tools.py
+venv
+error.txt

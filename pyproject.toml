@@ -8,29 +8,31 @@ version = "0.3.2"
 description = "Cortex — a library for autonomous GUI agents using multimodal LLMs."
 readme = "README.md"
 authors = [{ name = "Udit" }]
-requires-python = ">=3.9, <=3.12"
+requires-python = ">=3.10, <=3.12"
 keywords = ["ai", "llm", "gui", "agent", "multimodal", "cua", "cortex"]
 
 # Core dependencies for Cortex + Azure OpenAI + vLLM grounding
 dependencies = [
     "numpy",
     "backoff",
-    "openai",           # OpenAI, Azure OpenAI, and vLLM all use openai SDK
-    "langfuse",         # LLM observability & tracing
-    "pyautogui",        # Screen interaction
-    "pillow",           # Image processing (PIL)
-    "pytesseract",      # OCR for grounding
-    "python-dotenv",    # .env file loading
+    "openai", # OpenAI, Azure OpenAI, and vLLM all use openai SDK
+    "langfuse", # LLM observability & tracing
+    "langgraph>=0.4.0", # Graph-based agent orchestration
+    "langchain>=0.3.0", # Required for langfuse callbacks
+    "langchain-openai>=0.3.0", # LangChain Azure/OpenAI bindings
+    "pyautogui", # Screen interaction
+    "pillow", # Image processing (PIL)
+    "pytesseract", # OCR for grounding
+    "python-dotenv", # .env file loading
     "pywinauto; sys_platform == 'win32'",
     "pywin32; sys_platform == 'win32'",
     "pyobjc; sys_platform == 'darwin'",
+    "fastapi>=0.128.8",
+    "uvicorn[standard]>=0.39.0",
+    "fastmcp>=2.0.0", # MCP client for tool servers
+    "langchain-google-genai>=4.2.1",
 ]
 
-[project.optional-dependencies]
-# Install with: uv sync --extra gemini
-gemini = [
-    "google-genai",
-]
 
 # Install with: uv sync --extra dev
 dev = [
