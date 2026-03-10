@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 import pyautogui
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import ToolMessage
 from langgraph.graph import END, StateGraph
 from langfuse import observe, get_client
@@ -525,131 +524,6 @@ async def _ensure_tool_manager() -> ToolManager:
     return _tool_manager
 
 
-_GEMINI_UNSUPPORTED_KEYS = {
-    "$defs", "definitions", "$schema", "$comment", "$id",
-    "additionalProperties", "default", "examples", "title",
-    "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-    "if", "then", "else", "not", "allOf",
-}
-_GEMINI_VALID_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
-
-
-def _sanitize_schema(schema: Any, root_schema: Any = None) -> Any:
-    """Recursively sanitize JSON schema for Gemini's strict function-calling requirements."""
-    import copy
-    if root_schema is None:
-        root_schema = schema
-
-    if not isinstance(schema, dict):
-        if isinstance(schema, list):
-            return [_sanitize_schema(item, root_schema) for item in schema]
-        return schema
-
-    s = copy.deepcopy(schema)
-
-    # Resolve $ref inline
-    if "$ref" in s:
-        ref_path = s["$ref"]
-        if ref_path.startswith("#/"):
-            parts = ref_path.split("/")[1:]
-            resolved = root_schema
-            for p in parts:
-                if isinstance(resolved, dict) and p in resolved:
-                    resolved = resolved[p]
-                else:
-                    break
-            else:
-                return _sanitize_schema(resolved, root_schema)
-        return {"type": "string"}  # unresolvable ref → fallback
-
-    # Collapse oneOf/anyOf → pick first non-null concrete candidate
-    for kw in ("oneOf", "anyOf"):
-        if kw in s and isinstance(s[kw], list) and s[kw]:
-            candidates = [c for c in s[kw] if not (isinstance(c, dict) and c.get("type") == "null")]
-            chosen = candidates[0] if candidates else s[kw][0]
-            return _sanitize_schema(chosen, root_schema)
-
-    # Handle const → minimal typed schema
-    if "const" in s:
-        val = s["const"]
-        t = "string" if isinstance(val, str) else "integer" if isinstance(val, int) else "boolean" if isinstance(val, bool) else "string"
-        return {"type": t, "description": f"Must be {val}"}
-
-    # Remove None values and all unsupported keys
-    for k in list(s.keys()):
-        if s[k] is None or k in _GEMINI_UNSUPPORTED_KEYS:
-            del s[k]
-
-    # Fix type if it's a list → pick first non-null
-    if "type" in s and isinstance(s["type"], list):
-        types = [t for t in s["type"] if t != "null"]
-        s["type"] = types[0] if types else "string"
-
-    # Ensure type is a valid Gemini string
-    if "type" in s:
-        st = s["type"]
-        if not isinstance(st, str) or st not in _GEMINI_VALID_TYPES:
-            del s["type"]
-
-    # Infer object type from properties
-    if "properties" in s and "type" not in s:
-        s["type"] = "object"
-
-    # Convert open-ended object types (type=object with no inner properties)
-    # to type=string.  This prevents Pydantic crashes in langchain-google-genai
-    # when a tool parameter is literally named "properties" — the Gemini SDK's
-    # Schema model confuses user parameter names with JSON Schema keywords.
-    if s.get("type") == "object" and "properties" not in s:
-        desc = s.get("description", "")
-        s["type"] = "string"
-        s["description"] = f"{desc} (JSON string)".strip()
-
-    # Recurse into properties values (each value is a sub-schema)
-    if "properties" in s and isinstance(s["properties"], dict):
-        new_props = {}
-        for pk, pv in s["properties"].items():
-            if isinstance(pv, str):
-                new_props[pk] = {"type": pv} if pv in _GEMINI_VALID_TYPES else {"type": "string"}
-            elif isinstance(pv, dict):
-                new_props[pk] = _sanitize_schema(pv, root_schema)
-            else:
-                new_props[pk] = {"type": "string"}
-        s["properties"] = new_props
-
-    # Recurse into items (array item schema)
-    if "items" in s and isinstance(s["items"], dict):
-        s["items"] = _sanitize_schema(s["items"], root_schema)
-    elif "items" in s and isinstance(s["items"], list):
-        s["items"] = [_sanitize_schema(item, root_schema) for item in s["items"]]
-
-    # Empty schema → default to string
-    if not s:
-        return {"type": "string"}
-
-    # Strip required entries whose properties don't exist
-    if "required" in s and isinstance(s["required"], list):
-        props = set(s.get("properties", {}).keys())
-        s["required"] = [r for r in s["required"] if isinstance(r, str) and r in props]
-        if not s["required"]:
-            del s["required"]
-
-    return s
-
-
-def _deep_clean_required(obj: Any) -> None:
-    """Post-pass: recursively remove required entries that don't exist in properties."""
-    if isinstance(obj, dict):
-        if "required" in obj and isinstance(obj["required"], list):
-            props = set(obj.get("properties", {}).keys())
-            obj["required"] = [r for r in obj["required"] if r in props]
-            if not obj["required"]:
-                del obj["required"]
-        for v in list(obj.values()):
-            _deep_clean_required(v)
-    elif isinstance(obj, list):
-        for item in obj:
-            _deep_clean_required(item)
-
 
 def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
     """Convert MCP tools → OpenAI function-calling schema for llm.bind(tools=...)."""
@@ -664,9 +538,6 @@ def _mcp_tools_to_openai_functions(tool_manager: ToolManager) -> list:
             input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
         elif hasattr(tool, "input_schema"):
             input_schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
-            
-        input_schema = _sanitize_schema(input_schema, input_schema)
-        _deep_clean_required(input_schema)
 
         functions.append({
             "type": "function",
@@ -1003,12 +874,14 @@ class Cortex:
         _log_fn = log_fn
         _todo_fn = todo_fn
 
-        # Single shared LLM
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-pro",
-            api_key=os.getenv("GEMINI_API_KEY"),
-            temperature=1,
-            max_tokens=4096,
+        # Single shared LLM (Azure OpenAI)
+        self.llm = AzureChatOpenAI(
+            model=os.getenv("MODEL", "gpt-5-mini"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            api_version=os.getenv("OPENAI_API_VERSION", "2024-12-01-preview"),
+            temperature=0,
+            max_tokens=None,
         )
         _llm = self.llm
 

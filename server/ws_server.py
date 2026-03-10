@@ -15,14 +15,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from langfuse import get_client, observe
 import uvicorn
-import base64
 
-try:
-    from google import genai
-    from google.genai import types
-    has_genai = True
-except ImportError:
-    has_genai = False
 
 # Load .env from the CORTEX root directory
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -215,61 +208,6 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg["type"] == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
                 
-            elif msg["type"] == "stt_audio":
-                if not has_genai:
-                    await ws.send_text(json.dumps({
-                        "type": "log", "level": "error",
-                        "message": "google-genai not installed. Run `uv sync --extra gemini`.",
-                        "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
-                    }))
-                    continue
-                
-                api_key = os.environ.get("GEMINI_API_KEY")
-                if not api_key:
-                    await ws.send_text(json.dumps({
-                        "type": "log", "level": "error",
-                        "message": "GEMINI_API_KEY not found in .env file.",
-                        "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
-                    }))
-                    continue
-                
-                try:
-                    await ws.send_text(json.dumps({
-                        "type": "log", "level": "info",
-                        "message": "OpenAI transcribing...",
-                        "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
-                    }))
-                    
-                    audio_bytes = base64.b64decode(msg["data"])
-                    
-                    def _transcribe():
-                        client = genai.Client()
-                        response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=[
-                                types.Part.from_bytes(data=audio_bytes, mime_type='audio/webm'),
-                                "Transcribe the following audio accurately. Reply ONLY with the transcript, no other text."
-                            ]
-                        )
-                        return response.text.strip()
-                    
-                    transcript = await asyncio.get_running_loop().run_in_executor(None, _transcribe)
-                    
-                    await ws.send_text(json.dumps({
-                        "type": "transcript",
-                        "text": transcript
-                    }))
-                    await ws.send_text(json.dumps({
-                        "type": "log", "level": "success",
-                        "message": "Transcription complete.",
-                        "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
-                    }))
-                except Exception as e:
-                    await ws.send_text(json.dumps({
-                        "type": "log", "level": "error",
-                        "message": f"STT failed: {str(e)}",
-                        "time": time.strftime("%H:%M:%S"), "icon": "🎙️",
-                    }))
 
     except WebSocketDisconnect:
         pass

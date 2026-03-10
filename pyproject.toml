@@ -33,11 +33,6 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
 ]
 
-[project.optional-dependencies]
-# Install with: uv sync --extra gemini
-gemini = [
-    "google-genai",
-]
 
 # Install with: uv sync --extra dev
 dev = [

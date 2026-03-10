@@ -50,8 +50,8 @@ class MCPAgent:
                         messages.append(ToolMessage(content=tool_result, tool_call_id=call_id))
                         continue
                         
-                    logger.info("🔧 Calling %s.%s(%s)", server, tool_name, json.dumps(func_args, default=str)[:200])
-                    print(f"[{time.strftime('%H:%M:%S')}]   └─ 🔧 {server}.{tool_name}", flush=True)
+                    logger.info("Calling %s.%s(%s)", server, tool_name, json.dumps(func_args, default=str)[:200])
+                    print(f"[{time.strftime('%H:%M:%S')}]   └─ {server}.{tool_name}", flush=True)
                     
                     try:
                         result = await tm.call_tool(server, tool_name, func_args)

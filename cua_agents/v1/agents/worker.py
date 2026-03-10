@@ -5,7 +5,6 @@ import textwrap
 from typing import Dict, List, Tuple
 
 from cua_agents.v1.agents.grounding import ACI
-from cua_agents.v1.core.module import BaseModule
 from cua_agents.v1.memory.procedural_memory import PROCEDURAL_MEMORY
 from cua_agents.v1.utils.common_utils import (
     call_llm_safe,
@@ -23,7 +22,7 @@ from langfuse import observe, get_client
 logger = logging.getLogger("cortex.agent")
 
 
-class Worker(BaseModule):
+class Worker:
     def __init__(
         self,
         worker_engine_params: Dict,
@@ -46,7 +45,8 @@ class Worker(BaseModule):
             enable_reflection: bool
                 Whether to enable reflection
         """
-        super().__init__(worker_engine_params, platform)
+        self.engine_params = worker_engine_params
+        self.platform = platform
 
         self.temperature = worker_engine_params.get("temperature", 0.0)
         self.use_thinking = worker_engine_params.get("model", "") in [
@@ -100,7 +100,7 @@ class Worker(BaseModule):
         engine_type = self.engine_params.get("engine_type", "")
 
         # Flush strategy for long-context models: keep all text, only keep latest images
-        if engine_type in ["anthropic", "openai", "gemini"]:
+        if engine_type in ["anthropic", "openai"]:
             max_images = self.max_trajectory_length
             for agent in [self.generator_agent, self.reflection_agent]:
                 if agent is None:
