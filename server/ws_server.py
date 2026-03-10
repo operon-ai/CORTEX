@@ -16,6 +16,10 @@ from fastapi.responses import JSONResponse
 from langfuse import get_client, observe
 import uvicorn
 
+# Move imports to top for better visibility and earlier error detection
+from cua_agents.v1.agents.cortex import Cortex
+from cua_agents.v1.utils.azure_audio import AzureAudio
+
 
 # Load .env from the CORTEX root directory
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,16 +37,17 @@ _clients: list[WebSocket] = []
 _agent_running = False
 _stop_flag = threading.Event()
 _cortex = None
+_audio = None
 
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    global _event_loop, _cortex
+    global _event_loop, _cortex, _audio
     _event_loop = asyncio.get_running_loop()
 
     # Pre-initialize the Cortex orchestrator early
-    log_to_ui("Pre-initializing Cortex orchestrator and agents…", "info", "⚙️")
-    from cua_agents.v1.agents.cortex import Cortex
+    print(f"[{time.strftime('%H:%M:%S')}] [INIT] Pre-initializing Cortex orchestrator and agents...", flush=True)
+    
     _cortex = Cortex(
         max_steps=30,
         hide_ui=_hide_ui,
@@ -51,8 +56,13 @@ async def _on_startup() -> None:
         log_fn=log_to_ui,
         todo_fn=push_todo,
     )
+    
+    print(f"[{time.strftime('%H:%M:%S')}] [INIT] Initializing Azure Audio...", flush=True)
+    _audio = AzureAudio()
+    
     # Perform warm-up (connect MCP, start agents)
     await _cortex.warm_up()
+    print(f"[{time.strftime('%H:%M:%S')}] [INIT] Startup initialization complete.", flush=True)
 
 
 # ── Broadcast helpers (thread-safe) ──────────────────────────────────────────
@@ -86,6 +96,10 @@ def log_to_ui(message: str, level: str = "info", icon: str = "") -> None:
         "time": ts,
         "icon": icon,
     })
+    
+    # Optional: Speak the log message if it's an important update
+    if level in ["success", "error"] and _audio:
+        _audio.speak(message)
 
 
 def set_status(status: str) -> None:
@@ -122,16 +136,16 @@ def _run_agent(task: str) -> None:
         langfuse = get_client()
         langfuse.update_current_trace(name=task)
 
-        log_to_ui(f"Task: {task}", "info", "📋")
+        log_to_ui(f"Task: {task}", "info")
         set_status("running")
 
         try:
             # Run the orchestrator graph using the pre-initialized global instance
             if _cortex is None:
-                log_to_ui("Error: Cortex not initialized.", "error", "❌")
+                log_to_ui("Error: Cortex not initialized.", "error")
                 return
 
-            log_to_ui("Starting orchestrator loop…", "success", "🚀")
+            log_to_ui("Starting orchestrator loop…", "success")
             final_state = _cortex.run(task)
 
             # Clean up
@@ -141,14 +155,14 @@ def _run_agent(task: str) -> None:
             import traceback
             tb = traceback.format_exc()
             print(f"[{time.strftime('%H:%M:%S')}] [CRITICAL] {exc}\n{tb}", flush=True)
-            log_to_ui(f"Error: {exc}", "error", "❌")
+            log_to_ui(f"Error: {exc}", "error")
             set_status("error")
 
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
         print(f"[{time.strftime('%H:%M:%S')}] [ERROR] {exc}\n{tb}", flush=True)
-        log_to_ui(f"Error: {exc}", "error", "❌")
+        log_to_ui(f"Error: {exc}", "error")
         set_status("error")
     finally:
         try:
@@ -169,7 +183,7 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    global _agent_running
+    global _agent_running, _audio
     await ws.accept()
     _clients.append(ws)
 
@@ -193,7 +207,7 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_text(json.dumps({
                         "type": "log", "level": "warning",
                         "message": "Agent is already running.",
-                        "time": time.strftime("%H:%M:%S"), "icon": "⚠️",
+                        "time": time.strftime("%H:%M:%S"),
                     }))
                 else:
                     _agent_running = True
@@ -208,6 +222,32 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg["type"] == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
                 
+            elif msg["type"] == "stt_audio":
+                # Handle audio transcription via Azure OpenAI
+                audio_data = msg.get("data") # base64 (matches client send)
+                if _audio is None:
+                    log_to_ui("Azure Audio is NOT initialized yet. Check server logs.", "error")
+                elif not audio_data:
+                    log_to_ui("Audio data missing from WebSocket message.", "warning")
+                else:
+                    log_to_ui("Transcribing audio...", "info")
+                    import base64
+                    import tempfile
+                    
+                    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+                        tmp.write(base64.b64decode(audio_data))
+                        tmp_path = tmp.name
+                    
+                    try:
+                        text = await _audio.transcribe(tmp_path)
+                        await ws.send_text(json.dumps({
+                            "type": "transcript",
+                            "text": text
+                        }))
+                        log_to_ui(f"Heard: {text}", "info")
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
 
     except WebSocketDisconnect:
         pass

@@ -43,7 +43,7 @@ signal.signal(signal.SIGTERM, cleanup)
 
 
 def main():
-    print("\n  ⚡ CORTEX Launcher")
+    print("\n  CORTEX Launcher")
     print("  ──────────────────\n")
 
     # 1. Start the Python server
@@ -56,9 +56,9 @@ def main():
 
     time.sleep(1.5)
     if server_proc.poll() is not None:
-        print("  ❌  Server failed to start. Check server/ws_server.py.")
+        print("  Server failed to start. Check server/ws_server.py.")
         sys.exit(1)
-    print("  ✅  Server running (PID {})".format(server_proc.pid))
+    print("  Server running (PID {})".format(server_proc.pid))
 
     # 2. Start the Electron GUI
     print("  [2/2] Starting Electron GUI …")
@@ -69,7 +69,7 @@ def main():
         shell=False,
     )
     procs.append(gui_proc)
-    print("  ✅  GUI starting (PID {})".format(gui_proc.pid))
+    print("  GUI starting (PID {})".format(gui_proc.pid))
 
     print("\n  Press Ctrl+C to stop both processes.\n")
 
