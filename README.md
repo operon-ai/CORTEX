@@ -41,6 +41,8 @@ The frontend and backend communicate via a real-time WebSocket protocol (port 75
 
 ## Installation & Setup
 
+# Setup Guidelines:  [Click Here](https://drive.google.com/file/d/1ClRsBRRJufG1eRTnhDTuxa1ZC4YFvxNf/view?usp=sharing).
+
 ### Prerequisites
 - **Python 3.10+** (Recommend using a virtual environment).
 - **Node.js 18+** (For the Electron GUI).
